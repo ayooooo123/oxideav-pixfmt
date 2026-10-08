@@ -817,6 +817,22 @@ pub fn chroma_444_to_411(src: &[u8], dst: &mut [u8], w: usize, h: usize) {
     }
 }
 
+/// 4:1:0 chroma (`ceil(w / 4) × ceil(h / 4)`) → the finer
+/// `ceil(w / dw) × ceil(h / dh)` grid of 4:4:4 (`dw = dh = 1`), 4:2:2
+/// (`2, 1`) or 4:2:0 (`2, 2`): nearest, each destination sample taking
+/// the 4:1:0 sample whose 4×4 luma block holds its first luma position
+/// (duplication, as the other upsamplers here). Any width and height.
+pub fn chroma_410_up(src: &[u8], dst: &mut [u8], w: usize, h: usize, dw: usize, dh: usize) {
+    let scw = w.div_ceil(4);
+    let (dcw, dch) = (w.div_ceil(dw), h.div_ceil(dh));
+    for row in 0..dch {
+        let s = &src[row * dh / 4 * scw..];
+        for (col, d) in dst[row * dcw..row * dcw + dcw].iter_mut().enumerate() {
+            *d = s[col * dw / 4];
+        }
+    }
+}
+
 /// 4:1:1 chroma → 4:4:4 chroma (horizontal nearest, broadcasting each
 /// chroma sample to four luma columns; vertical dimension unchanged).
 /// `w` is the destination's full image width; the source plane is

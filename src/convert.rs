@@ -743,6 +743,7 @@ fn is_yuv_carriage(f: PixelFormat) -> bool {
             | P::Yuv422P
             | P::Yuv444P
             | P::Yuv411P
+            | P::Yuv410P
             | P::Yuv420P10Le
             | P::Yuv422P10Le
             | P::Yuv444P10Le
@@ -1396,6 +1397,16 @@ const TABLE: &[(PixelFormat, PixelFormat, ConvertOp)] = {
         (P::Yuv411P, P::Rgba,  YuvToRgb { wsub: 4, hsub: 1, alpha: true, full_range: false }),
         (P::Rgb24,   P::Yuv411P, RgbToYuv { wsub: 4, hsub: 1, alpha_in: false, full_range: false }),
         (P::Rgba,    P::Yuv411P, RgbToYuv { wsub: 4, hsub: 1, alpha_in: true, full_range: false }),
+
+        // Yuv410P (4:1:0 planar — chroma quarter width and quarter
+        // height): FFmpeg's yuv410p, the output of SVQ1 and Indeo 2/3.
+        // Decode direction: to 4:4:4 / 4:2:2 / 4:2:0 by duplicating each
+        // chroma sample over its 4×4 block (RGB, NV12 and the rest stage
+        // through those), and luma to gray. Any width and height.
+        (P::Yuv410P, P::Yuv444P, ChromaResample { src_wsub: 4, src_hsub: 4, dst_wsub: 1, dst_hsub: 1 }),
+        (P::Yuv410P, P::Yuv422P, ChromaResample { src_wsub: 4, src_hsub: 4, dst_wsub: 2, dst_hsub: 1 }),
+        (P::Yuv410P, P::Yuv420P, ChromaResample { src_wsub: 4, src_hsub: 4, dst_wsub: 2, dst_hsub: 2 }),
+        (P::Yuv410P, P::Gray8, YuvLumaToGray { full_range: false }),
 
         // Yuva420P / Yuva422P / Yuva444P (planar YUV + a full-resolution
         // alpha plane appended as plane 3 — the alpha plane is `w × h`
@@ -3664,7 +3675,7 @@ fn do_rgb_to_yuv(
 /// trailing column). Every other siting rounds up per the odd-dimension
 /// rule on [`convert_with`].
 fn chroma_grid(w: usize, h: usize, wsub: usize, hsub: usize) -> Result<(usize, usize)> {
-    if wsub == 4 && w % 4 != 0 {
+    if (wsub, hsub) == (4, 1) && w % 4 != 0 {
         return Err(Error::invalid(
             "pixfmt: 4:1:1 YUV requires width divisible by 4",
         ));
@@ -3945,6 +3956,11 @@ fn resample_chroma_pair(
         (4, 1, 2, 2) => {
             yuv::chroma_411_to_420(u_src, &mut u_dst, w, h);
             yuv::chroma_411_to_420(v_src, &mut v_dst, w, h);
+        }
+        // 4:1:0 → 4:4:4 / 4:2:2 / 4:2:0  (nearest over each 4×4 block)
+        (4, 4, dw @ (1 | 2), dh @ (1 | 2)) if (dw, dh) != (1, 2) => {
+            yuv::chroma_410_up(u_src, &mut u_dst, w, h, dw, dh);
+            yuv::chroma_410_up(v_src, &mut v_dst, w, h, dw, dh);
         }
         _ => {
             return Err(Error::unsupported(

@@ -40,6 +40,8 @@ impl FormatInfo {
             P::Yuv444P | P::YuvJ444P => Self::yuv(8, 1, 1),
             // 4:1:1 — luma at full res, chroma horizontally subsampled by 4.
             P::Yuv411P => Self::yuv(8, 4, 1),
+            // 4:1:0 — chroma subsampled by 4 on both axes (FFmpeg's yuv410p).
+            P::Yuv410P => Self::yuv(8, 4, 4),
             P::Yuv420P10Le => Self::yuv(10, 2, 2),
             P::Yuv422P10Le => Self::yuv(10, 2, 1),
             P::Yuv444P10Le => Self::yuv(10, 1, 1),
