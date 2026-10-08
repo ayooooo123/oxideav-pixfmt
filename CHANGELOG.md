@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `Yuv410P` (4:1:0, core's FFmpeg `yuv410p`): to 4:4:4, 4:2:2 and 4:2:0 by
+  nearest duplication over each 4×4 block, luma to gray; RGB, NV12 and the
+  rest stage through those. Any width and height (the 4:1:1 width rule
+  stays on 4:1:1).
+
 ## [0.1.9](https://github.com/OxideAV/oxideav-pixfmt/compare/v0.1.8...v0.1.9) - 2026-09-27
 
 ### Added
