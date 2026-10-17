@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Regression coverage for over-range deep sample words, both serial and
+  threaded, plus every possible stored 16-bit word through existing
+  conversion routes. This fork predates the upstream composed-luma
+  lookup; its staged routes already mask padding bits. Retain those
+  algorithms rather than importing unrelated direct-route and
+  palette-alpha changes requiring newer core APIs.
+
 ## [0.1.9](https://github.com/OxideAV/oxideav-pixfmt/compare/v0.1.8...v0.1.9) - 2026-09-27
 
 ### Added
