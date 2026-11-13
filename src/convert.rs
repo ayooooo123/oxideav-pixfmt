@@ -2323,6 +2323,48 @@ impl ConvertOp {
         opts: &ConvertOptions,
         ctx: &Resolved,
     ) -> Result<VideoFrame> {
+        // Gate out encode-only arms at the mouth so LTO drops palette quantisers, dithering, CMYK/float
+        // encoders, and RGB->YUV kernels while keeping every decoded picture format wet and intact.
+        #[cfg(feature = "decode-only")]
+        if matches!(
+            *self,
+            Self::RgbToYuv { .. }
+                | Self::RgbToNv { .. }
+                | Self::RgbToPacked422 { .. }
+                | Self::RgbToPal8 { .. }
+                | Self::GrayToPal8
+                | Self::RgbToCmyk { .. }
+                | Self::GrayToCmyk { .. }
+                | Self::RgbToYuva { .. }
+                | Self::Rgb48ToDeepYuv { .. }
+                | Self::RgbToPlanarFamily { .. }
+                | Self::GrayToPlanarFamily { .. }
+                | Self::GrayToYuvPlanar { .. }
+                | Self::GrayToNv
+                | Self::GrayToPacked422 { .. }
+                | Self::GrayToGbr { .. }
+                | Self::Packed8ToGbr { .. }
+                | Self::Packed8ToGbr8 { .. }
+                | Self::PackedDeepToGbr { .. }
+                | Self::PackedDeepToGbr8 { .. }
+                | Self::IntToFloat { .. }
+                | Self::DeepYuvToFloat { .. }
+                | Self::FloatToDeepYuv { .. }
+                | Self::FloatToFloat { .. }
+                | Self::Rgb24ToRgb48
+                | Self::RgbaToRgba64
+                | Self::Ya8ToYa16
+                | Self::Gray16ToYa16
+                | Self::Gray8ToYa16
+                | Self::Rgba64ToYa16
+                | Self::Packed8ToYa16 { .. }
+                | Self::GrayToMono { .. }
+                | Self::RgbToGray { .. }
+                | Self::Rgb24ToYa8
+                | Self::RgbaToYa8
+        ) {
+            return Err(Error::unsupported("pixfmt: encode path disabled by decode-only"));
+        }
         // The plain `Yuv*` paths use the limited-range matrix and the
         // full-range `YuvJ*` paths the full-range matrix — range is a
         // property of the pixel format, so only the primaries half of

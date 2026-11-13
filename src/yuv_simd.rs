@@ -16,6 +16,7 @@ enum Path {
     Avx2 = 2,
     Neon = 3,
     Portable = 4,
+    Wasm = 5,
 }
 
 static DISPATCH: AtomicU8 = AtomicU8::new(Path::Unknown as u8);
@@ -42,6 +43,9 @@ fn select_path() -> Path {
             return Path::Neon;
         }
     }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128", not(miri)))]
+    return Path::Wasm;
+    #[cfg(not(all(target_arch = "wasm32", target_feature = "simd128", not(miri))))]
     Path::Scalar
 }
 
@@ -52,6 +56,7 @@ fn path() -> Path {
             x if x == Path::Avx2 as u8 => Path::Avx2,
             x if x == Path::Neon as u8 => Path::Neon,
             x if x == Path::Portable as u8 => Path::Portable,
+            x if x == Path::Wasm as u8 => Path::Wasm,
             _ => Path::Scalar,
         };
     }
@@ -86,6 +91,8 @@ pub(crate) fn yuv420_to_rgb24(
         Path::Avx2 => unsafe { avx2::yuv420_to_rgb24(yp, up, vp, dst, w, h, matrix) },
         #[cfg(target_arch = "aarch64")]
         Path::Neon => unsafe { neon::yuv420_to_rgb24(yp, up, vp, dst, w, h, matrix) },
+        #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+        Path::Wasm => unsafe { wasm::yuv420_to_rgb24(yp, up, vp, dst, w, h, matrix) },
         #[cfg(feature = "nightly")]
         Path::Portable => portable::yuv420_to_rgb24(yp, up, vp, dst, w, h, matrix),
         _ => yuv::yuv420_to_rgb24_scalar(yp, up, vp, dst, w, h, matrix),
@@ -106,6 +113,8 @@ pub(crate) fn yuv422_to_rgb24(
         Path::Avx2 => unsafe { avx2::yuv422_to_rgb24(yp, up, vp, dst, w, h, matrix) },
         #[cfg(target_arch = "aarch64")]
         Path::Neon => unsafe { neon::yuv422_to_rgb24(yp, up, vp, dst, w, h, matrix) },
+        #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+        Path::Wasm => unsafe { wasm::yuv422_to_rgb24(yp, up, vp, dst, w, h, matrix) },
         _ => yuv::yuv422_to_rgb24_scalar(yp, up, vp, dst, w, h, matrix),
     }
 }
@@ -124,6 +133,8 @@ pub(crate) fn yuv444_to_rgb24(
         Path::Avx2 => unsafe { avx2::yuv444_to_rgb24(yp, up, vp, dst, w, h, matrix) },
         #[cfg(target_arch = "aarch64")]
         Path::Neon => unsafe { neon::yuv444_to_rgb24(yp, up, vp, dst, w, h, matrix) },
+        #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+        Path::Wasm => unsafe { wasm::yuv444_to_rgb24(yp, up, vp, dst, w, h, matrix) },
         _ => yuv::yuv444_to_rgb24_scalar(yp, up, vp, dst, w, h, matrix),
     }
 }
@@ -186,5 +197,7 @@ pub(crate) fn rgb24_to_yuv444(
 pub(crate) mod avx2;
 #[cfg(target_arch = "aarch64")]
 pub(crate) mod neon;
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+pub(crate) mod wasm;
 #[cfg(feature = "nightly")]
 pub(crate) mod portable;
