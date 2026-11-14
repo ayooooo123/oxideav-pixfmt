@@ -9,13 +9,10 @@
 //! (`YuvJ* → Yuv* (range rescale) → RGB`).
 
 use oxideav_core::{PixelFormat, VideoFrame, VideoPlane};
-use oxideav_pixfmt::{convert, ColorSpace, ConvertOptions, FrameInfo};
+use oxideav_pixfmt::{ColorSpace, ConvertOptions, FrameInfo, convert};
 
 fn opts(cs: ColorSpace) -> ConvertOptions {
-    ConvertOptions {
-        color_space: cs,
-        ..Default::default()
-    }
+    ConvertOptions::default().with_color_space(cs)
 }
 
 /// Build a planar YUV frame with the given plane dimensions and constant
@@ -153,8 +150,8 @@ fn direct_yuvj_matches_two_step_staging() {
         for (i, s) in src.planes[0].data.iter_mut().enumerate() {
             *s = ((i * 7) % 256) as u8;
         }
-        for p in 1..=2 {
-            for (i, s) in src.planes[p].data.iter_mut().enumerate() {
+        for (p, plane) in src.planes.iter_mut().enumerate().skip(1).take(2) {
+            for (i, s) in plane.data.iter_mut().enumerate() {
                 *s = ((i * 11 + p * 40) % 256) as u8;
             }
         }

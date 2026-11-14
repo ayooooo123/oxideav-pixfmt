@@ -13,7 +13,7 @@ use oxideav_core::{
 };
 use oxideav_pixfmt::yuv::{self, YuvMatrix};
 use oxideav_pixfmt::{
-    convert, convert_with, ColorSpace, ConvertContext, ConvertOptions, FrameInfo,
+    ColorSpace, ConvertContext, ConvertOptions, FrameInfo, convert, convert_with,
 };
 
 fn ramp(n: usize, mul: usize, add: usize) -> Vec<u8> {
@@ -75,10 +75,7 @@ fn unsignalled_frames_convert_exactly_as_before() {
     let (w, h) = (10, 6);
     let f = yuv_frame(w, h, 2, 2, true);
     let info = FrameInfo::new(PixelFormat::Yuva420P, w as u32, h as u32);
-    let o = ConvertOptions {
-        color_space: ColorSpace::Bt709Limited,
-        ..Default::default()
-    };
+    let o = ConvertOptions::default().with_color_space(ColorSpace::Bt709Limited);
     let plain = convert(&f, info, PixelFormat::Rgba, &o).unwrap();
     assert_eq!(
         plain.planes[0].data,
@@ -169,7 +166,7 @@ fn full_range_deep_420_reaches_the_deep_matrix() {
     // Unsignalled: 1023 is above limited-range white → clips to 65535
     // anyway; use a mid-grey to see the range matter.
     let mut grey = f.clone();
-    for p in grey.planes[0].data.chunks_exact_mut(2) {
+    for p in grey.planes[0].data.as_chunks_mut::<2>().0 {
         p.copy_from_slice(&word(512));
     }
     let limited = convert(&grey, info, PixelFormat::Rgb48Le, &o).unwrap();
@@ -191,7 +188,7 @@ fn full_range_deep_420_reaches_the_deep_matrix() {
     // codes on G, within 0.1 % of full scale.
     let white = f.with_color_signal(ColorSignal::unspecified().with_range(ColorRange::Full));
     let out = convert(&white, info, PixelFormat::Rgba64Le, &o).unwrap();
-    for px in out.planes[0].data.chunks_exact(8) {
+    for px in out.planes[0].data.as_chunks::<8>().0 {
         for c in 0..3 {
             let v = u16::from_le_bytes([px[c * 2], px[c * 2 + 1]]);
             assert!(v >= 65535 - 64, "channel {c} = {v}");
@@ -245,8 +242,8 @@ fn identity_matrix_routes_planes_as_gbr() {
         .with_range(ColorRange::Limited)
         .with_matrix(MatrixCoefficients::IDENTITY);
     let mut black_white = yuv_frame(2, 1, 1, 1, false);
-    for p in 0..3 {
-        black_white.planes[p].data = vec![16, 235];
+    for plane in black_white.planes.iter_mut().take(3) {
+        plane.data = vec![16, 235];
     }
     let bw = convert(
         &black_white.with_color_signal(lim),
@@ -333,13 +330,15 @@ fn unimplemented_matrices_reject_cleanly() {
             "{code:?}"
         );
         // A carriage move ignores the matrix.
-        assert!(convert(
-            &tagged,
-            info,
-            PixelFormat::Yuv444P,
-            &ConvertOptions::default()
-        )
-        .is_ok());
+        assert!(
+            convert(
+                &tagged,
+                info,
+                PixelFormat::Yuv444P,
+                &ConvertOptions::default()
+            )
+            .is_ok()
+        );
     }
 }
 
@@ -445,10 +444,7 @@ fn matrix_range_depth_cross_product() {
                     ColorRange::Full => false,
                     _ => !label_full,
                 };
-                let o = ConvertOptions {
-                    color_space: cs,
-                    ..Default::default()
-                };
+                let o = ConvertOptions::default().with_color_space(cs);
                 let ctx = ConvertContext::new().with_range(range);
                 let mx = m(kr, kb, limited);
                 // 8-bit RGBA row.

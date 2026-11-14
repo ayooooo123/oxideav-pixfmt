@@ -14,7 +14,7 @@ mod swizzle_simd;
 
 /// Component index into a 4-byte packed pixel. Used to describe where
 /// R, G, B, and A live for each of the 4-channel formats.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Rgba4 {
     pub r: usize,
     pub g: usize,
@@ -48,8 +48,15 @@ pub const ABGR_POS: Rgba4 = Rgba4 {
     a: 0,
 };
 
+/// Byte positions of the padded alpha-less layouts (core 0.1.41): the
+/// colour lanes of the alpha twin, with `a` naming the padding lane.
+pub const RGBX_POS: Rgba4 = RGBA_POS;
+pub const BGRX_POS: Rgba4 = BGRA_POS;
+pub const XRGB_POS: Rgba4 = ARGB_POS;
+pub const XBGR_POS: Rgba4 = ABGR_POS;
+
 /// Component index into a 3-byte packed pixel.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Rgb3 {
     pub r: usize,
     pub g: usize,
@@ -104,6 +111,48 @@ pub fn rgb3_to_rgba4(src: &[u8], src_pos: Rgb3, dst: &mut [u8], dst_pos: Rgba4, 
     swizzle_simd::rgb3_to_rgba4_perm(src, dst, pixels, perm3);
 }
 
+/// Convert a 3-byte packed source to a 4-byte packed destination whose
+/// fourth lane is a constant: `fill = 255` synthesises opaque alpha
+/// (what [`rgb3_to_rgba4`] does), `fill = 0` writes the padding byte of
+/// the alpha-less `Rgbx` / `Bgrx` / `Xrgb` / `Xbgr` layouts (core
+/// 0.1.41: writers emit 0, readers ignore it).
+pub fn rgb3_to_rgba4_fill(
+    src: &[u8],
+    src_pos: Rgb3,
+    dst: &mut [u8],
+    dst_pos: Rgba4,
+    pixels: usize,
+    fill: u8,
+) {
+    let mut perm3 = [0xFFu8; 4];
+    perm3[dst_pos.r] = src_pos.r as u8;
+    perm3[dst_pos.g] = src_pos.g as u8;
+    perm3[dst_pos.b] = src_pos.b as u8;
+    swizzle_simd::rgb3_to_rgba4_fill_perm(src, dst, pixels, perm3, fill);
+}
+
+/// Swizzle a packed 4-byte pixel stream between two `Rgba4` layouts
+/// carrying only the colour lanes: the destination's fourth lane
+/// (`dst_pos.a`) is written as the constant `fill` and the source's is
+/// never read. This is the move between an alpha layout and its padded
+/// twin (`Rgba → Rgbx` with `fill = 0`, `Rgbx → Rgba` with `fill =
+/// 255`) and between two padded layouts.
+pub fn swizzle4_fill(
+    src: &[u8],
+    src_pos: Rgba4,
+    dst: &mut [u8],
+    dst_pos: Rgba4,
+    pixels: usize,
+    fill: u8,
+) {
+    debug_assert!(src.len() >= pixels * 4 && dst.len() >= pixels * 4);
+    let mut perm = [0xFFu8; 4];
+    perm[dst_pos.r] = src_pos.r as u8;
+    perm[dst_pos.g] = src_pos.g as u8;
+    perm[dst_pos.b] = src_pos.b as u8;
+    swizzle_simd::swizzle4_fill_perm(src, dst, pixels, perm, fill);
+}
+
 /// Drop the alpha channel, converting a 4-byte packed source to a
 /// 3-byte packed destination.
 pub fn rgba4_to_rgb3(src: &[u8], src_pos: Rgba4, dst: &mut [u8], dst_pos: Rgb3, pixels: usize) {
@@ -134,60 +183,62 @@ pub fn rgb48_to_rgb24(src: &[u8], dst: &mut [u8], pixels: usize) {
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn rgb48_to_rgb24_avx2(src: &[u8], dst: &mut [u8], pixels: usize) {
-    use core::arch::x86_64::*;
-    // 2 pixels per __m128i iteration: 12 source bytes → 6 dst bytes.
-    // That's too small — bump up to 4 pixels = 24 src bytes = one full
-    // __m128i input, producing 12 dst bytes per iteration.
-    //
-    // For each pixel `p` in 0..4, we want dst[p*3 + c] = src[p*6 + c*2 + 1]
-    // for c in 0..3. Source-byte offsets within the 16-byte input:
-    //   pixel 0: 1, 3, 5
-    //   pixel 1: 7, 9, 11
-    //   pixel 2: 13, 15, (17 - out of lane)
-    //   pixel 3: (19, 21, 23 - out of lane)
-    // So 4 pixels won't fit in one 16-byte load. Use 2 pixels per
-    // iteration = 12 src bytes → 6 dst bytes instead — still avoids
-    // scalar-per-byte.
-    const SHUF: [u8; 16] = [
-        1, 3, 5, 7, 9, 11, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80,
-    ];
-    let shuf = _mm_loadu_si128(SHUF.as_ptr() as *const __m128i);
+    unsafe {
+        use core::arch::x86_64::*;
+        // 2 pixels per __m128i iteration: 12 source bytes → 6 dst bytes.
+        // That's too small — bump up to 4 pixels = 24 src bytes = one full
+        // __m128i input, producing 12 dst bytes per iteration.
+        //
+        // For each pixel `p` in 0..4, we want dst[p*3 + c] = src[p*6 + c*2 + 1]
+        // for c in 0..3. Source-byte offsets within the 16-byte input:
+        //   pixel 0: 1, 3, 5
+        //   pixel 1: 7, 9, 11
+        //   pixel 2: 13, 15, (17 - out of lane)
+        //   pixel 3: (19, 21, 23 - out of lane)
+        // So 4 pixels won't fit in one 16-byte load. Use 2 pixels per
+        // iteration = 12 src bytes → 6 dst bytes instead — still avoids
+        // scalar-per-byte.
+        const SHUF: [u8; 16] = [
+            1, 3, 5, 7, 9, 11, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80,
+        ];
+        let shuf = _mm_loadu_si128(SHUF.as_ptr() as *const __m128i);
 
-    // Each SIMD iteration writes a full 16-byte register but only the
-    // first 6 bytes are meaningful, then advances the dst cursor by 6
-    // on the next iteration. The *final* SIMD iteration's 16-byte
-    // store must fit entirely within `dst[..pixels*3]` — otherwise it
-    // walks past the end of the destination slice and corrupts what
-    // follows (the next row of the parent buffer, or for the final
-    // row, the heap allocator headers right after the destination
-    // Vec).
-    //
-    // Required: chunks*6 + 16 ≤ pixels*3, so chunks ≤ (pixels*3 - 16)/6.
-    // Equivalently, the SIMD loop must leave at least
-    // ceil(16/3) = 6 dst-pixels' worth of room (18 bytes) for the tail
-    // to fall inside the slice. Reserve a 6-pixel tail.
-    //
-    // (The previous "2-pixel tail" reserve only protected the read
-    // side; the write side over-ran the slice by 4 bytes on every
-    // call. On x86_64 Linux CI this manifested as a glibc malloc
-    // sysmalloc assertion when the corrupted bytes happened to be
-    // allocator metadata.)
-    let simd_pixels = pixels.saturating_sub(6);
-    let chunks = simd_pixels / 2;
-    for c in 0..chunks {
-        let soff = c * 12;
-        let doff = c * 6;
-        let v = _mm_loadu_si128(src.as_ptr().add(soff) as *const __m128i);
-        let out = _mm_shuffle_epi8(v, shuf);
-        // Store 16 bytes; the next iteration's 6-byte advance and
-        // scalar tail together overwrite the 10 dead bytes.
-        _mm_storeu_si128(dst.as_mut_ptr().add(doff) as *mut __m128i, out);
-    }
-    let tail_start = chunks * 2;
-    for i in tail_start..pixels {
-        dst[i * 3] = src[i * 6 + 1];
-        dst[i * 3 + 1] = src[i * 6 + 3];
-        dst[i * 3 + 2] = src[i * 6 + 5];
+        // Each SIMD iteration writes a full 16-byte register but only the
+        // first 6 bytes are meaningful, then advances the dst cursor by 6
+        // on the next iteration. The *final* SIMD iteration's 16-byte
+        // store must fit entirely within `dst[..pixels*3]` — otherwise it
+        // walks past the end of the destination slice and corrupts what
+        // follows (the next row of the parent buffer, or for the final
+        // row, the heap allocator headers right after the destination
+        // Vec).
+        //
+        // Required: chunks*6 + 16 ≤ pixels*3, so chunks ≤ (pixels*3 - 16)/6.
+        // Equivalently, the SIMD loop must leave at least
+        // ceil(16/3) = 6 dst-pixels' worth of room (18 bytes) for the tail
+        // to fall inside the slice. Reserve a 6-pixel tail.
+        //
+        // (The previous "2-pixel tail" reserve only protected the read
+        // side; the write side over-ran the slice by 4 bytes on every
+        // call. On x86_64 Linux CI this manifested as a glibc malloc
+        // sysmalloc assertion when the corrupted bytes happened to be
+        // allocator metadata.)
+        let simd_pixels = pixels.saturating_sub(6);
+        let chunks = simd_pixels / 2;
+        for c in 0..chunks {
+            let soff = c * 12;
+            let doff = c * 6;
+            let v = _mm_loadu_si128(src.as_ptr().add(soff) as *const __m128i);
+            let out = _mm_shuffle_epi8(v, shuf);
+            // Store 16 bytes; the next iteration's 6-byte advance and
+            // scalar tail together overwrite the 10 dead bytes.
+            _mm_storeu_si128(dst.as_mut_ptr().add(doff) as *mut __m128i, out);
+        }
+        let tail_start = chunks * 2;
+        for i in tail_start..pixels {
+            dst[i * 3] = src[i * 6 + 1];
+            dst[i * 3 + 1] = src[i * 6 + 3];
+            dst[i * 3 + 2] = src[i * 6 + 5];
+        }
     }
 }
 

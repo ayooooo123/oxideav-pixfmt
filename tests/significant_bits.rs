@@ -18,7 +18,7 @@
 //!   composes with the palette side-channel.
 
 use oxideav_core::{PixelFormat, VideoFrame, VideoPlane};
-use oxideav_pixfmt::{convert, ConvertOptions, FrameInfo};
+use oxideav_pixfmt::{ConvertOptions, FrameInfo, convert};
 
 /// MSB-replicating widen mirroring the documented policy (pattern
 /// repetition into the freed low bits).
@@ -169,7 +169,7 @@ fn record_equals_materialised_frame_everywhere() {
             .enumerate()
             .map(|(p, plane)| VideoPlane {
                 stride: plane.stride,
-                data: le16_plane(plane.data.chunks_exact(2).map(|c| {
+                data: le16_plane(plane.data.as_chunks::<2>().0.iter().map(|c| {
                     let v = u16::from_le_bytes([c[0], c[1]]) as u32;
                     widen(v, if p == 0 { 12 } else { 10 }, 16) as u16
                 })),
@@ -215,8 +215,8 @@ fn sub_8bit_record_on_byte_surface() {
         &ConvertOptions::default(),
     )
     .expect("gray8[4] → gray16");
-    for i in 0..w * h {
-        let v4 = (src.planes[0].data[i] & 0xF) as u32;
+    for (i, &sample) in src.planes[0].data.iter().enumerate().take(w * h) {
+        let v4 = (sample & 0xF) as u32;
         let v8 = widen(v4, 4, 8);
         // Gray8 → Gray16Le is the exact ×257 widen of the normalised
         // 8-bit value.
@@ -465,13 +465,15 @@ fn record_on_gbrp8_validates_and_normalises() {
     };
     // 9 > nominal 8 → Error::Invalid.
     let bad = frame.clone().with_significant_bits(vec![8, 8, 9]);
-    assert!(convert(
-        &bad,
-        FrameInfo::new(PixelFormat::Gbrp8, w as u32, h as u32),
-        PixelFormat::Rgb24,
-        &ConvertOptions::default(),
-    )
-    .is_err());
+    assert!(
+        convert(
+            &bad,
+            FrameInfo::new(PixelFormat::Gbrp8, w as u32, h as u32),
+            PixelFormat::Rgb24,
+            &ConvertOptions::default(),
+        )
+        .is_err()
+    );
     // R plane genuinely 6-bit → widened to 8 before the reorder.
     let marked = frame.clone().with_significant_bits(vec![8, 8, 6]);
     let out = convert(

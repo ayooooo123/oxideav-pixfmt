@@ -3,7 +3,7 @@
 
 #![allow(unsafe_op_in_unsafe_fn)]
 
-use crate::yuv::{yuv_to_rgb_fp, DecodeParams, YuvMatrix, FP_HALF, FP_SHIFT};
+use crate::yuv::{DecodeParams, FP_HALF, FP_SHIFT, YuvMatrix, yuv_to_rgb_fp};
 use core::arch::wasm32::*;
 
 const LANES: usize = 8;
@@ -31,14 +31,20 @@ unsafe fn decode_block_i32x8(
     let b_hi = i32x4_shr(i32x4_add(i32x4_add(y_hi, i32x4_mul(cb_b, cb_hi)), bias), SH);
     let g_lo = i32x4_shr(
         i32x4_add(
-            i32x4_sub(i32x4_sub(y_lo, i32x4_mul(cg_cr, cr_lo)), i32x4_mul(cg_cb, cb_lo)),
+            i32x4_sub(
+                i32x4_sub(y_lo, i32x4_mul(cg_cr, cr_lo)),
+                i32x4_mul(cg_cb, cb_lo),
+            ),
             bias,
         ),
         SH,
     );
     let g_hi = i32x4_shr(
         i32x4_add(
-            i32x4_sub(i32x4_sub(y_hi, i32x4_mul(cg_cr, cr_hi)), i32x4_mul(cg_cb, cb_hi)),
+            i32x4_sub(
+                i32x4_sub(y_hi, i32x4_mul(cg_cr, cr_hi)),
+                i32x4_mul(cg_cb, cb_hi),
+            ),
             bias,
         ),
         SH,
@@ -68,7 +74,9 @@ unsafe fn load8_sub_i32(src: &[u8], off: i32) -> (v128, v128) {
 #[inline]
 #[target_feature(enable = "simd128")]
 unsafe fn load_chroma_4_broadcast(src: &[u8]) -> (v128, v128) {
-    let bytes = [src[0], src[0], src[1], src[1], src[2], src[2], src[3], src[3]];
+    let bytes = [
+        src[0], src[0], src[1], src[1], src[2], src[2], src[3], src[3],
+    ];
     load8_sub_i32(&bytes, 128)
 }
 

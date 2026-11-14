@@ -604,7 +604,10 @@ pub fn rgb24_to_yuv420(
 #[inline]
 fn pair_average_row(src: &[u8], dst: &mut [u8], w: usize) {
     let full = w / 2;
-    for (d, pair) in dst[..full].iter_mut().zip(src[..full * 2].chunks_exact(2)) {
+    for (d, pair) in dst[..full]
+        .iter_mut()
+        .zip(src[..full * 2].as_chunks::<2>().0)
+    {
         *d = ((pair[0] as u16 + pair[1] as u16).div_ceil(2)) as u8;
     }
     if w % 2 == 1 {
@@ -705,23 +708,25 @@ fn dup_bytes_2x(src: &[u8], dst: &mut [u8], n: usize) {
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn dup_bytes_2x_avx2(src: &[u8], dst: &mut [u8], n: usize) {
-    use core::arch::x86_64::*;
-    // 16 source bytes → 32 dest bytes per iteration via two
-    // _mm_unpack[lo|hi]_epi8(v, v) that interleave the vector with
-    // itself. The unpack produces a duplicated-byte stream directly.
-    let chunks = n / 16;
-    for c in 0..chunks {
-        let off = c * 16;
-        let v = _mm_loadu_si128(src.as_ptr().add(off) as *const __m128i);
-        let lo = _mm_unpacklo_epi8(v, v);
-        let hi = _mm_unpackhi_epi8(v, v);
-        _mm_storeu_si128(dst.as_mut_ptr().add(off * 2) as *mut __m128i, lo);
-        _mm_storeu_si128(dst.as_mut_ptr().add(off * 2 + 16) as *mut __m128i, hi);
-    }
-    let tail = chunks * 16;
-    for i in tail..n {
-        dst[i * 2] = src[i];
-        dst[i * 2 + 1] = src[i];
+    unsafe {
+        use core::arch::x86_64::*;
+        // 16 source bytes → 32 dest bytes per iteration via two
+        // _mm_unpack[lo|hi]_epi8(v, v) that interleave the vector with
+        // itself. The unpack produces a duplicated-byte stream directly.
+        let chunks = n / 16;
+        for c in 0..chunks {
+            let off = c * 16;
+            let v = _mm_loadu_si128(src.as_ptr().add(off) as *const __m128i);
+            let lo = _mm_unpacklo_epi8(v, v);
+            let hi = _mm_unpackhi_epi8(v, v);
+            _mm_storeu_si128(dst.as_mut_ptr().add(off * 2) as *mut __m128i, lo);
+            _mm_storeu_si128(dst.as_mut_ptr().add(off * 2 + 16) as *mut __m128i, hi);
+        }
+        let tail = chunks * 16;
+        for i in tail..n {
+            dst[i * 2] = src[i];
+            dst[i * 2 + 1] = src[i];
+        }
     }
 }
 
@@ -1141,6 +1146,45 @@ pub fn rgb48_to_yuv444p16(
     }
 }
 
+/// The Y' row of `p` for one 16-bit (R, G, B) sample: Q30, rounded
+/// once, clamped to the 16-bit code space.
+#[inline]
+pub(crate) fn rgb16_to_luma16_fp(r: u16, g: u16, b: u16, p: &EncodeParams16) -> u16 {
+    let y = (p.cy_r * r as i64 + p.cy_g * g as i64 + p.cy_b * b as i64 + p.y_bias) >> FP16_SHIFT;
+    clamp_u16_i64(y)
+}
+
+/// Project `pixels` packed 16-bit RGB(A) pixels of `comps` LE words
+/// each (R, G, B first) onto 16-bit luma words through the Q30 Y' row
+/// of `p`; the chroma rows are never evaluated.
+#[inline]
+fn packed16_to_luma16(src: &[u8], comps: usize, dst: &mut [u8], pixels: usize, p: &EncodeParams16) {
+    for i in 0..pixels {
+        let r = c16_get(src, i * comps) as i64;
+        let g = c16_get(src, i * comps + 1) as i64;
+        let b = c16_get(src, i * comps + 2) as i64;
+        let y = (p.cy_r * r + p.cy_g * g + p.cy_b * b + p.y_bias) >> FP16_SHIFT;
+        c16_put(dst, i, clamp_u16_i64(y) as u32);
+    }
+}
+
+/// Project a tightly-packed `Rgb48Le` buffer onto a `Gray16Le` luma
+/// plane using the Y' row of `matrix` evaluated in Q30 at 16-bit
+/// precision — the deep analogue of [`rgb24_to_gray8`]. `Gray16Le` is a
+/// full-range space, so callers converting *to* it should pass a
+/// full-range matrix. Each coefficient is within 2^-30 of its real
+/// value and the sum is rounded once, so the result is within 1 LSB of
+/// the f64 projection; for `r = g = b = v` the output is exactly `v`.
+pub fn rgb48le_to_gray16le(src: &[u8], dst: &mut [u8], pixels: usize, matrix: YuvMatrix) {
+    packed16_to_luma16(src, 3, dst, pixels, &matrix.encode_params16());
+}
+
+/// [`rgb48le_to_gray16le`] for a tightly-packed `Rgba64Le` buffer: the
+/// alpha word is skipped, never read into the projection.
+pub fn rgba64le_to_gray16le(src: &[u8], dst: &mut [u8], pixels: usize, matrix: YuvMatrix) {
+    packed16_to_luma16(src, 4, dst, pixels, &matrix.encode_params16());
+}
+
 /// Read the little-endian 16-bit sample at index `i` of `buf`.
 #[inline]
 fn c16_get(buf: &[u8], i: usize) -> u32 {
@@ -1337,39 +1381,41 @@ fn deinterleave_u8_pair(src: &[u8], a: &mut [u8], b: &mut [u8], n: usize) {
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn deinterleave_u8_pair_avx2(src: &[u8], a: &mut [u8], b: &mut [u8], n: usize) {
-    use core::arch::x86_64::*;
-    // 32 source bytes per iteration (= 16 output bytes per stream).
-    // Two pshufb on each __m128i pull the evens / odds apart.
-    const MASK_EVEN: [u8; 16] = [
-        0, 2, 4, 6, 8, 10, 12, 14, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80,
-    ];
-    const MASK_ODD: [u8; 16] = [
-        1, 3, 5, 7, 9, 11, 13, 15, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80,
-    ];
-    let m_even = _mm_loadu_si128(MASK_EVEN.as_ptr() as *const __m128i);
-    let m_odd = _mm_loadu_si128(MASK_ODD.as_ptr() as *const __m128i);
+    unsafe {
+        use core::arch::x86_64::*;
+        // 32 source bytes per iteration (= 16 output bytes per stream).
+        // Two pshufb on each __m128i pull the evens / odds apart.
+        const MASK_EVEN: [u8; 16] = [
+            0, 2, 4, 6, 8, 10, 12, 14, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80,
+        ];
+        const MASK_ODD: [u8; 16] = [
+            1, 3, 5, 7, 9, 11, 13, 15, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80,
+        ];
+        let m_even = _mm_loadu_si128(MASK_EVEN.as_ptr() as *const __m128i);
+        let m_odd = _mm_loadu_si128(MASK_ODD.as_ptr() as *const __m128i);
 
-    let chunks = n / 16;
-    for c in 0..chunks {
-        let soff = c * 32;
-        let doff = c * 16;
-        let v0 = _mm_loadu_si128(src.as_ptr().add(soff) as *const __m128i);
-        let v1 = _mm_loadu_si128(src.as_ptr().add(soff + 16) as *const __m128i);
-        // Low half of each: bytes 0..7 valid, rest zero.
-        let a0 = _mm_shuffle_epi8(v0, m_even);
-        let b0 = _mm_shuffle_epi8(v0, m_odd);
-        let a1 = _mm_shuffle_epi8(v1, m_even);
-        let b1 = _mm_shuffle_epi8(v1, m_odd);
-        // Combine: pack the two halves into one 16-byte register.
-        let a_comb = _mm_unpacklo_epi64(a0, a1);
-        let b_comb = _mm_unpacklo_epi64(b0, b1);
-        _mm_storeu_si128(a.as_mut_ptr().add(doff) as *mut __m128i, a_comb);
-        _mm_storeu_si128(b.as_mut_ptr().add(doff) as *mut __m128i, b_comb);
-    }
-    let tail = chunks * 16;
-    for i in tail..n {
-        a[i] = src[i * 2];
-        b[i] = src[i * 2 + 1];
+        let chunks = n / 16;
+        for c in 0..chunks {
+            let soff = c * 32;
+            let doff = c * 16;
+            let v0 = _mm_loadu_si128(src.as_ptr().add(soff) as *const __m128i);
+            let v1 = _mm_loadu_si128(src.as_ptr().add(soff + 16) as *const __m128i);
+            // Low half of each: bytes 0..7 valid, rest zero.
+            let a0 = _mm_shuffle_epi8(v0, m_even);
+            let b0 = _mm_shuffle_epi8(v0, m_odd);
+            let a1 = _mm_shuffle_epi8(v1, m_even);
+            let b1 = _mm_shuffle_epi8(v1, m_odd);
+            // Combine: pack the two halves into one 16-byte register.
+            let a_comb = _mm_unpacklo_epi64(a0, a1);
+            let b_comb = _mm_unpacklo_epi64(b0, b1);
+            _mm_storeu_si128(a.as_mut_ptr().add(doff) as *mut __m128i, a_comb);
+            _mm_storeu_si128(b.as_mut_ptr().add(doff) as *mut __m128i, b_comb);
+        }
+        let tail = chunks * 16;
+        for i in tail..n {
+            a[i] = src[i * 2];
+            b[i] = src[i * 2 + 1];
+        }
     }
 }
 
@@ -1413,7 +1459,7 @@ pub fn yuyv422_to_yuv422p(
     w: usize,
     h: usize,
 ) {
-    debug_assert!(w % 2 == 0, "YUYV requires even width");
+    debug_assert!(w.is_multiple_of(2), "YUYV requires even width");
     let cw = w / 2;
     debug_assert!(src.len() >= w * h * 2);
     debug_assert!(yp.len() >= w * h);
@@ -1445,7 +1491,7 @@ pub fn uyvy422_to_yuv422p(
     w: usize,
     h: usize,
 ) {
-    debug_assert!(w % 2 == 0, "UYVY requires even width");
+    debug_assert!(w.is_multiple_of(2), "UYVY requires even width");
     let cw = w / 2;
     debug_assert!(src.len() >= w * h * 2);
     debug_assert!(yp.len() >= w * h);
@@ -1469,7 +1515,7 @@ pub fn uyvy422_to_yuv422p(
 /// Merge planar Yuv422P (`yp` full-res; `up`, `vp` each `w/2 × h`)
 /// into a packed YUYV byte stream `dst` of length `w * h * 2`.
 pub fn yuv422p_to_yuyv422(yp: &[u8], up: &[u8], vp: &[u8], dst: &mut [u8], w: usize, h: usize) {
-    debug_assert!(w % 2 == 0, "YUYV requires even width");
+    debug_assert!(w.is_multiple_of(2), "YUYV requires even width");
     let cw = w / 2;
     debug_assert!(yp.len() >= w * h);
     debug_assert!(up.len() >= cw * h);
@@ -1492,7 +1538,7 @@ pub fn yuv422p_to_yuyv422(yp: &[u8], up: &[u8], vp: &[u8], dst: &mut [u8], w: us
 /// Merge planar Yuv422P into a packed UYVY byte stream. Mirror of
 /// [`yuv422p_to_yuyv422`] with luma and chroma byte positions swapped.
 pub fn yuv422p_to_uyvy422(yp: &[u8], up: &[u8], vp: &[u8], dst: &mut [u8], w: usize, h: usize) {
-    debug_assert!(w % 2 == 0, "UYVY requires even width");
+    debug_assert!(w.is_multiple_of(2), "UYVY requires even width");
     let cw = w / 2;
     debug_assert!(yp.len() >= w * h);
     debug_assert!(up.len() >= cw * h);
@@ -1520,7 +1566,7 @@ pub fn yuyv_uyvy_swap(buf: &mut [u8]) {
     //   index 0 ↔ index 1  (Y0 ↔ U)
     //   index 2 ↔ index 3  (Y1 ↔ V)
     debug_assert!(
-        buf.len() % 4 == 0,
+        buf.len().is_multiple_of(4),
         "packed 4:2:2 buffer must be a multiple of 4 bytes"
     );
     let mut i = 0;
@@ -1614,7 +1660,7 @@ pub fn depth_down_le16_plane(src: &[u8], dst: &mut [u8], count: usize, bits: u32
     let mask: u32 = (1u32 << bits) - 1;
     for (d, w) in dst[..count]
         .iter_mut()
-        .zip(src[..count * 2].chunks_exact(2))
+        .zip(src[..count * 2].as_chunks::<2>().0)
     {
         let v = u16::from_le_bytes([w[0], w[1]]) as u32 & mask;
         *d = (v >> shift) as u8;
@@ -1649,7 +1695,9 @@ pub fn depth_up_8_to_le16_plane(src: &[u8], dst: &mut [u8], count: usize, bits: 
 pub fn rgb24_to_gray8(src: &[u8], dst: &mut [u8], pixels: usize, matrix: YuvMatrix) {
     let p = matrix.encode_params();
     for (px, d) in src[..pixels * 3]
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .zip(dst[..pixels].iter_mut())
     {
         let r = px[0] as i32;
@@ -1680,8 +1728,8 @@ pub fn depth_rescale_le16_plane(
         "depth_rescale: bits out of range"
     );
     let mask: u32 = ((1u64 << src_bits) - 1) as u32;
-    let src_pairs = src[..count * 2].chunks_exact(2);
-    let dst_pairs = dst[..count * 2].chunks_exact_mut(2);
+    let src_pairs = src[..count * 2].as_chunks::<2>().0.iter();
+    let dst_pairs = dst[..count * 2].as_chunks_mut::<2>().0.iter_mut();
     // Hoist the direction branch out of the per-sample loop so each
     // specialised body is a straight-line shift chain the compiler can
     // vectorise.

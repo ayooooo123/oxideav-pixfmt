@@ -40,12 +40,14 @@ oxideav-pixfmt = { version = "0.1", features = ["nightly"] }
 | category                | formats / operations                                                        |
 | ----------------------- | --------------------------------------------------------------------------- |
 | RGB / BGR family        | `Rgb24`, `Bgr24`, `Rgba`, `Bgra`, `Argb`, `Abgr` — all-to-all swizzles      |
-| Deep RGB                | `Rgb48Le` ↔ `Rgb24`, `Rgba64Le` ↔ `Rgba`, `Rgb48Le` ↔ `Rgba64Le` (colour words verbatim, opaque 65535 synthesis / drop) |
+| Padded 32-bit RGB       | `Rgbx` / `Bgrx` / `Xrgb` / `Xbgr` (core 0.1.41: the alpha twins' byte positions with a padding byte, written 0 and never read) — direct ↔ every single-plane 8-bit order, each other, the 16-bit words, `Gray8`, `Pal8` and **every planar YUV(A) family member** (through the `Rgb24` engine; alpha destinations get opaque alpha); a padded → alpha move synthesises opaque alpha |
+| Packed 16-bit RGB       | `Rgb555Le/Be` / `Bgr555Le/Be` / `Rgb565Le/Be` / `Bgr565Le/Be` (core 0.1.41: one word per pixel, the 5-5-5 top bit is padding written 0) — direct ↔ `Rgb24` / `Bgr24` / `Rgba` / `Bgra` / `Argb` / `Abgr`, the padded four, each other, `Gray8` and `Pal8`; 5 / 6 → 8 bits by replication (`(v << 3) \| (v >> 2)`, `(v << 2) \| (v >> 4)`), 8 → 5 / 6 by truncation — exact round trips, and a 5-5-5 ↔ 5-6-5 relayout byte-identical to staging through 8 bits; the quantiser honours `ConvertOptions::dither` (ordered Bayer and integer Floyd–Steinberg, both pinned bit-for-bit) — see *Packed 16-bit words* below |
+| Deep RGB                | `Rgb48Le` ↔ `Rgb24`, `Rgba64Le` ↔ `Rgba`, `Rgb48Le` ↔ `Rgba64Le` (colour words verbatim, opaque 65535 synthesis / drop); `Rgb48Le` / `Rgba64Le` → **every** planar YUV(A) member in one banded 16-bit encode (chroma subsampled at 16 bits, planes narrowed afterwards) |
 | Deep matrix             | the 16-bit planar tier ({`Yuv`,`Yuva`} × {420,422,444} `P16Le` + `Yuv440P16Le`) ↔ `Rgb48Le` / `Rgba64Le` at **full 16-bit precision** (Q30 k-coefficient construction, chroma resampled at 16 bits, Yuva alpha word verbatim); the 10/12-bit family stages in losslessly via the exact widen |
-| Planar GBR              | the full ten-member ladder — `Gbrp8` / `Gbrap8` (byte planes) through `Gbrp10/12/14Le` to the full-width `Gbrp16Le` / `Gbrap16Le` — ↔ **both** `Rgb48Le` and `Rgba64Le` (alpha synthesised opaque / dropped when the shapes differ) and ↔ `Rgb24` / `Rgba`; plus `Gray8` interop (full-range luminance projection out, MSB-replicated broadcast in) and `Gbrp8` ↔ `Gbrap8` alpha append / drop |
+| Planar GBR              | the full ten-member ladder — `Gbrp8` / `Gbrap8` (byte planes) through `Gbrp10/12/14Le` to the full-width `Gbrp16Le` / `Gbrap16Le` — ↔ **both** `Rgb48Le` and `Rgba64Le` (ladder widen / truncation; alpha synthesised opaque / dropped when the shapes differ) and ↔ `Rgb24` / `Rgba`; plus `Gray8` / `Gray10Le` / `Gray12Le` / `Gray16Le` interop (luminance projection out — at 16 bits for the deep words — and the rescaled broadcast in) and `Gbrp8` ↔ `Gbrap8` alpha append / drop |
 | YUV planar ↔ RGB        | `Yuv420P` / `Yuv422P` / `Yuv444P` ↔ `Rgb24` / `Rgba`, plus the full-range `YuvJ*` families direct ↔ RGB; any width / height (chroma `ceil(w/2)` × `ceil(h/2)`); optional row-band threads via `convert_with` |
 | Colour signalling       | the frame's `ColorSignal` record / a `ConvertContext` override select range (full range on `Yuva*` and 10/12/16-bit layouts) and the H.273 matrix (1, 4, 5, 6, 7, 9; identity → planar GBR) |
-| Bit-depth ladder        | planar YUV 8 ↔ 10 ↔ 12 ↔ 16 bit (same layout, exact round-trips; `Yuv*P16Le` is full-scale 65535); `Gray8` ↔ `Gray10Le` ↔ `Gray12Le` ↔ `Gray16Le` |
+| Bit-depth ladder        | planar YUV 8 ↔ 10 ↔ 12 ↔ 16 bit (same layout, exact round-trips; `Yuv*P16Le` is full-scale 65535); `Gray8` ↔ `Gray10Le` ↔ `Gray12Le` ↔ `Gray16Le` — see *Depth-preserving routes* for the widen / narrow rule |
 | Chroma subsampling      | `4:4:4` ↔ `4:2:2` ↔ `4:2:0` (SIMD-accelerated up- and down-sample); `4:4:0` (full-width, half-height chroma) ↔ every other siting via a vertical pair-average / row broadcast composed through 4:4:4 |
 | 4:4:0 planar            | `Yuv440P` / `Yuv440P10Le` / `Yuv440P12Le` / `Yuv440P16Le` are full members of the planar-family engine (direct to every planar YUV(A) member, `Rgb24` / `Rgba` / `Gray8`, `Yuv411P`, and `Yuv440P16Le` ↔ `Rgb48Le` on the deep matrix); odd widths and heights legal |
 | Scene-referred float    | `GrayF32Le` / `RgbF32Le` / `RgbaF32Le` / `GbrpF32Le` / `GbrapF32Le` (binary32 LE, linear light, no full-scale): all-to-all inside the family with **no clamping** (speculars above 1.0, negative excursions and NaN payloads survive), direct ↔ 18 integer shapes (`Gray8/10/12/16Le`, `Rgb24` / `Rgba` / `Rgb48Le` / `Rgba64Le`, the ten-member `Gbrp*`/`Gbrap*` ladder) by pure normalisation `code / (2^bits − 1)` in and saturating round-to-nearest out (NaN → 0; every integer code round-trips exactly; **no transfer function is applied** — use `transfer` for that), and direct ↔ the 16-bit planar YUV(A) tier through the deep matrix so 8/10/12-bit YUV stages in at full precision |
@@ -53,28 +55,28 @@ oxideav-pixfmt = { version = "0.1", features = ["nightly"] }
 | Semi-planar             | `NV12` / `NV21` ↔ `Yuv420P` / `Rgb24` / `Rgba`                              |
 | Packed 4:2:2            | `Yuyv422` / `Uyvy422` ↔ `Yuv422P` / `Rgb24` / `Rgba` + Yuyv ↔ Uyvy swap     |
 | Full ↔ limited range    | `YuvJ420P` / `YuvJ422P` / `YuvJ444P` ↔ `Yuv*`                               |
-| Gray ↔ YUV              | `Gray8` ↔ every YUV family (luma extraction / neutral-chroma synthesis)     |
-| Gray ↔ RGB              | `Gray8` → all six packed RGB orders; `Rgb24` / `Rgba` → `Gray8` (luminance) |
+| Gray ↔ YUV              | `Gray8` ↔ every YUV family (luma extraction / neutral-chroma synthesis); `Gray10Le` / `Gray12Le` / `Gray16Le` ↔ every planar YUV(A) member through the luma plane only, range-moved at the deeper of the two depths (`Gray16Le ↔ Yuv444P16Le`: 0 ↔ 4096, 65535 ↔ 60160) |
+| Gray ↔ RGB              | `Gray8` → all six packed RGB orders; `Rgb24` / `Rgba` → `Gray8` (luminance); `Gray10Le` / `Gray12Le` / `Gray16Le` ↔ `Rgb48Le` / `Rgba64Le` (bit-exact broadcast out, the 16-bit Y' row in — a 65536-code ramp round-trips exactly) |
 | Grayscale / mono        | `Gray8` / `Gray16Le`, `MonoBlack` / `MonoWhite` ↔ `Gray8`                   |
 | Grey + alpha            | `Ya8` ↔ `Gray8` / `Rgb24` / `Rgba` (luma broadcast, alpha carried through); `Ya16Le` ↔ `Ya8` (exact ×257 / high-byte), `Gray16Le` (luma word verbatim), `Gray8`, `Rgba64Le` (bit-exact broadcast + alpha carry) and `Rgb24` / `Rgba` |
 | CMYK                    | `Cmyk` and `CmykInverted` ↔ `Rgb24` / `Rgba` (uncalibrated device formula, lossless RGB round-trip); `Cmyk` ↔ `CmykInverted` exact per-byte complement |
 | YUV + alpha             | the full 12-member Yuva family — `Yuva420P` / `Yuva422P` / `Yuva444P` plus the deep 10/12/16-bit members at **all three** chroma sitings — ↔ siblings / each other / `Rgb24` / `Rgba` / `Gray8`; every ordered pair inside the family is direct; alpha bit-exact at same depth, MSB-widened / truncated across depths |
 | Significant bits        | source frames may carry the per-plane significant-bits side-channel (e.g. 12-bit luma + 10-bit chroma on a `P16Le` surface): `convert()` treats marked planes at their recorded depth, rejects invalid records with `Error::Invalid`, and never propagates a stale record |
-| Palette                 | `Pal8` ↔ `Rgb24` / `Rgba`, nearest-colour quantisation with optional dither; frames carry their table in-band via the `VideoFrame` palette side-channel |
+| Palette                 | `Pal8` ↔ `Rgb24` / `Rgba`, nearest-colour quantisation with optional dither; frames carry their table in-band via the `VideoFrame` palette side-channel, and per-entry alpha via the palette-alpha record (`Pal8 → Rgba*` honours it: transparent entry → alpha 0, uncovered entries opaque; `Pal8 → Rgb*` / `Gray8` drop it) |
 | Colour matrices         | BT.601 / BT.709 / BT.2020, limited (studio) / full (JPEG) range             |
 | Dither strategies       | None, 8×8 ordered Bayer, Floyd–Steinberg                                    |
 | Alpha / compositing     | Porter-Duff "over" (premul + straight), premul/unpremul, alpha-mask blit    |
 | Format introspection    | `FormatInfo::of(fmt)` → planes / bit-depth / `ChromaSubsampling` typed view |
 | Planar-family engine    | a computed dispatch tier makes *every* ordered pair inside the uniform planar YUV(A) family ({Yuv,Yuva} × {420,422,444} × {8,10,12,16}, plus `Yuv440P*` at the four depths) a direct single-step conversion: depth move + chroma resample (at the deeper of the two depths) + alpha handling fused in one op |
-| Staged fallback         | pairs without a direct entry route through ONE fidelity-chosen pivot (deep YUV moves pivot through the 16-bit tier, alpha-carrying deep moves through `Yuva*P16Le`) — **all 4830 ordered format pairs convert** (1478 direct); `supports()` / `supports_direct()` report availability |
+| Staged fallback         | pairs without a direct entry route through ONE fidelity-chosen pivot (deep YUV moves pivot through the 16-bit tier, alpha-carrying deep moves through `Yuva*P16Le`, alpha-less 8-bit moves through `Rgb24` before `Rgba`) — **all 6642 ordered format pairs convert** (2368 direct); `supports()` / `supports_direct()` / `staged_pivot()` report availability and the route; every staged route passes the depth / alpha / palette invariants below |
 
 ## Roadmap
 
 The pixel-format universe used by general-purpose video tooling runs
-to roughly two hundred entries; this crate currently covers the 70
+to roughly two hundred entries; this crate currently covers the 82
 `PixelFormat` variants oxideav-core defines, and the conversion
-matrix is **fully closed**: every one of the 70 × 69 = 4830 ordered
-pairs resolves — 1478 directly, the rest through one staged pivot. The
+matrix is **fully closed**: every one of the 82 × 81 = 6642 ordered
+pairs resolves — 2368 directly, the rest through one staged pivot. The
 formats below are *planned* — they're not implemented yet, but they
 have real callers in the codecs/containers we want to support, so the
 [`PixelFormat`](https://docs.rs/oxideav-core/latest/oxideav_core/enum.PixelFormat.html)
@@ -84,8 +86,8 @@ variants and `convert()` paths will land over time.
 
 | family                   | additions                                                                  |
 | ------------------------ | -------------------------------------------------------------------------- |
-| 16-bit packed RGB        | `Rgb565Le/Be`, `Rgb555Le/Be`, `Rgb444Le/Be` (+ BGR mirrors)                |
-| Padded 4-byte packed RGB | `0Rgb`, `Rgb0`, `0Bgr`, `Bgr0` (no-alpha 32-bit, alignment-friendly)       |
+| 16-bit packed RGB        | `Rgb565Le/Be`, `Rgb555Le/Be` (+ BGR mirrors) shipped (see table above); `Rgb444Le/Be` still pending a core variant |
+| Padded 4-byte packed RGB | shipped as `Rgbx` / `Bgrx` / `Xrgb` / `Xbgr` (see table above)             |
 | GBR planar               | shipped in full — the ten-member ladder (`Gbrp8` / `Gbrap8` through `Gbrap16Le`) with alpha-crossing deep-packed hops and `Gray8` interop (see table above) |
 | Legacy planar YUV        | `Yuv440P` shipped at 8/10/12/16 bits (see table above); `Yuv410P` and the `YuvJ440P` full-range mirror still pending a core variant |
 | 4:2:2 / 4:4:4 NV         | `Nv16`, `Nv24` — common on Android / embedded                              |
@@ -412,6 +414,93 @@ exposed both through `convert()` and directly as
 `yuv::{limited_to_full_luma, limited_to_full_chroma, full_to_limited_luma, full_to_limited_chroma}`
 so callers can flip range without going through RGB.
 
+### Depth-preserving routes
+
+Three rulings govern every route the planner picks; `tests/route_depth.rs`
+checks them over all 6642 ordered pairs and asserts zero violations.
+
+**Route-depth invariant.** When both endpoints carry more than 8 bits
+per channel (10 / 12 / 14 / 16-bit integer or binary32 float), every
+intermediate format on the route carries at least
+`min(depth(src), depth(dst))` bits per channel; when both endpoints
+carry alpha, no intermediate drops it; no route pivots through `Pal8`;
+float ↔ float never pivots through an integer format. `staged_pivot(src,
+dst)` reports the pivot a staged pair takes (`None` for direct pairs).
+Before round 476 the deep grey words, `Ya16Le` and the planar GBR ladder
+reached the 10 / 12-bit YUV family through `Gray8` / `Rgb24` / `Rgba` —
+320 pairs silently lost 8 bits mid-route; all of them are direct now.
+
+**Matrix selection at depth.** `Rgb48Le` / `Rgba64Le` → `Gray10Le` /
+`Gray12Le` / `Gray16Le` evaluate the Y' row of the selected primaries
+(BT.601 / BT.709 / BT.2020 through `ConvertOptions::color_space`, the
+same rule the 8-bit `Rgb24 → Gray8` row follows: the range half of the
+variant is ignored because the grey words are a full-range space) in
+Q30 at 16-bit scale, rounded once, then narrowed to the target width.
+The result is within 1 LSB of the f64 projection (pinned over a
+4096-sample structured sweep and 10^6 random samples) and exact for
+`r = g = b`. Grey ↔ YUV never touches a matrix: the luma plane moves
+alone, the chroma planes are the exact neutral mid-code
+`1 << (bits − 1)` and alpha is opaque full-scale.
+
+**Rescale convention.** Moving a sample between widths widens by MSB
+replication — `v << d | v >> (bits − d)`, i.e. `×257` from 8 to 16 — so
+zero maps to zero and peak to peak, and narrows by truncation (drop the
+low bits), which is the exact inverse: widen → narrow and narrow → widen
+→ narrow round-trips are lossless at every rung of the ladder (8 / 10 /
+12 / 14 / 16). A route that both rescales and range-moves (grey ↔ YUV
+across depths) widens first, applies the range move at the deeper of
+the two depths (H.273 equations 27–29 scaled by `2^(n−8)`: limited luma
+is `16·2^(n−8) .. 235·2^(n−8)`), then narrows — so no source code is
+merged before the rescale. A full-range colour signal (the frame's
+record or a `ConvertContext` override) turns the range move off and
+the luma move becomes the bare ladder move (`Gray16Le ↔ Yuv*P16Le` is a
+verbatim copy). The 8-bit grey ↔ 8-bit YUV rows keep their Q15 kernels.
+
+### Packed 16-bit words
+
+The `Rgb555*` / `Bgr555*` / `Rgb565*` / `Bgr565*` layouts (core 0.1.41)
+hold three sub-byte components in one 16-bit word; the format name
+lists them from the word's most significant bits down and the suffix
+is the byte order in memory. The core variant docs fix the layout and
+leave the widening to the consumer, so this crate applies its standing
+rescale convention: **5 / 6 → 8 bits by replication** (`(v << 3) | (v
+>> 2)`, `(v << 2) | (v >> 4)`: 0 → 0, full scale → 255, monotonic,
+within one code of the ideal rescale) and **8 → 5 / 6 by truncation**
+(`v >> 3`, `v >> 2`) — the exact inverse, so a word widened and packed
+again is bit-identical, and a 5-5-5 ↔ 5-6-5 relayout (`(g << 1) | (g >>
+4)` up, `g >> 1` down on green alone) equals staging through `Rgb24`.
+The unused top bit of a 5-5-5 word is written 0 and ignored on read; it
+is never alpha (a format that uses it as a one-bit attribute says so in
+its own header and decodes to an alpha-bearing layout).
+
+The way *in* is the one quantisation in this crate that honours
+`ConvertOptions::dither` (the depth ladder stays undithered):
+
+| `dither`          | rule                                                                 |
+| ----------------- | -------------------------------------------------------------------- |
+| `None` (default)  | truncation, as above                                                 |
+| `Bayer8x8`        | `q = min(v + t, 255) >> (8 − bits)` with `t = (BAYER8[y & 7][x & 7] · (256 >> bits)) >> 6` — a pure function of `(v, x, y)` |
+| `FloydSteinberg`  | integer error diffusion: residual `e = v′ − widen(q)` of the clamped, error-corrected sample, split `e·7/16` right, `e·3/16` below-left, `e·5/16` below and the exact remainder below-right (division truncating toward zero, shares leaving the picture dropped), rows left → right, top → bottom |
+
+Both are pinned bit-for-bit in `tests/packed16_words.rs` (a flat
+`[100, 100, 100]` tile under the ordered dither lifts red / blue to 13
+exactly where the matrix entry is ≥ 32; a hand-walked `[128, 128, 128]`
+row under error diffusion alternates `0x8410, 0x7C0F`). A relayout that
+narrows green 6 → 5 under a dither quantises green alone through its
+8-bit widening; red and blue are copied. The way *out* is a widen, so
+the setting has no effect there. `Gray8` and `Pal8` reach the words
+through the same quantiser (`Pal8` expands its palette first, alpha
+column dropped), and the words reach YUV carriage through an `Rgb24`
+pivot (`Rgba` when the other endpoint carries alpha).
+
+The padded `Rgbx` / `Bgrx` / `Xrgb` / `Xbgr` layouts share the byte
+positions of `Rgba` / `Bgra` / `Argb` / `Abgr`; the fourth byte is
+padding, written 0 by every route and never read (a junk padding byte
+changes nothing). A padded → alpha move synthesises opaque 255, an
+alpha → padded move drops alpha, and the planar YUV(A) family reaches
+them directly through the `Rgb24` engine (alpha destinations get opaque
+alpha, exactly as from `Rgb24`).
+
 ### Transfer functions
 
 The `transfer` module exposes opto-electronic and electro-optical
@@ -433,6 +522,244 @@ value 1.0 maps to that luminance per BT.2100-3 Table 4). The HLG
 inverse OETF returns relative scene light; pass it through
 `hlg_apply_ootf` with the user gain α and system gamma γ to obtain
 display-light values.
+
+## Colour models — `colorspace`
+
+`colorspace::ColorModel` converts gamma-encoded sRGB to and from other
+colour models on `f64`, unclamped, in natural units (hues in degrees,
+`L*` 0..100, XYZ with white at `Y = 1`):
+
+| model | `ColorModel` | staged source |
+| ----- | ------------ | ------------- |
+| linear sRGB | `LinearSrgb` | CSS Color 4 §10.2–10.3 |
+| CIE XYZ (D65, or D50 via Bradford) | `XyzD65`, `XyzD50` | Khronos Data Format 1.4 §14, ICC.1:2022 Annex E |
+| CIE xyY | `XyY` | Khronos Data Format 1.4 §14 |
+| CIELAB, LCh(ab) (D65 or D50 white) | `Lab(_)`, `Lch(_)` | ICC.1:2022 Annex A, CSS Color 4 §9 |
+| Oklab, OkLCh | `Oklab`, `Oklch` | CSS Color 4 §9.2, §19 |
+| HSL, HWB | `Hsl`, `Hwb` | CSS Color 4 §7, §8 |
+| device CMY | `Cmy` | ISO 32000-2 §10.4.2.4 |
+| gray / linear gray (any luma weights) | `Gray(_)`, `LinearGray(_)` | BT.601 / BT.709 / BT.2020 weights, ISO 32000-2 §10.4.2.2 |
+| Y′PbPr, full-range Y′CbCr | `YPbPr(_)`, `YCbCr(_)` | ITU-T H.273 eq. 37, 44–46 |
+| Y′CbCr narrow range (8-bit codes / 255) | `YCbCrLimited(_)` | ITU-T H.273 eq. 41–43; BT.601 / BT.709 / BT.2020 weights |
+| HSV / HSB, HSI, HCL, HCLp | `Hsv`, `Hsi`, `Hcl(_)`, `Hclp(_)` | Khronos Data Format 1.4 §5.5.8–5.5.11 (hexagonal / angular hue), CSS Color 4 §7 |
+| scRGB | `ScRgb` | IEC 61966-2-2: linear light on the sRGB primaries, D65, unclamped |
+| CIELUV, LCh(uv) (D65 or D50 white) | `Luv(_)`, `Lchuv(_)` | CIE 15 §8.2.2: `u* = 13·L*·(u′ − u′n)`, `u′ = 4X / (X + 15Y + 3Z)`, `v′ = 9Y / (X + 15Y + 3Z)` |
+| cylindrical "HCL" of CIELAB / CIELUV (hue first) | `HclAb(_)`, `HclUv(_)` | the LCh forms above in `(h°, C*, L*)` order |
+| Jzazbz, JzCzhz | `Jzazbz(nits)`, `JzCzhz(nits)` | Safdar, Cui, Kim, Luo, Optics Express 25(13), 2017; absolute D65 XYZ, sRGB white at the given cd/m² (`JZ_SDR_WHITE` 100, `JZ_HDR_REFERENCE_WHITE` 203) |
+| Y′UV (PAL) | `Yuv` | BT.470: `U = 0.436·(B′ − Y′) / 0.886`, `V = 0.615·(R′ − Y′) / 0.701`, BT.601 luma |
+| Y′IQ (NTSC) | `Yiq` | FCC 1953 / SMPTE 170M: the Y′UV pair rotated 33° |
+| Y′DbDr (SECAM) | `YDbDr` | BT.470: `Db = 1.505·(B′ − Y′)`, `Dr = −1.902·(R′ − Y′)` |
+| Ohta I1I2I3 | `Ohta` | Ohta, Kanade, Sakai 1980: `(R + G + B) / 3`, `(R − B) / 2`, `(2G − R − B) / 4` |
+| Kodak PhotoYCC (8-bit codes / 255) | `PhotoYcc` | Photo CD: BT.709 transfer, `Y₈ = 255·Y / 1.402`, `C1₈ = 111.40·(B′ − Y) + 156`, `C2₈ = 135.64·(R′ − Y) + 137` |
+| Cineon log (10-bit code / 1023) | `Log(CineonLog)` | Kodak Cineon printing density: `code = 685 + 300·log10(L·(1 − o) + o)`, `o = 10^(−590 / 300)` (white 685, black 95, gamma 0.6, 0.002 D per code) |
+| LMS (from D65 XYZ) | `Lms`, `LmsOf(ConeResponse)` | `M_CAT02` of CIECAM02 (CIE 159:2004), the linearised Bradford matrix (ICC.1:2022 Annex E) or Hunt–Pointer–Estevez normalised to D65 |
+
+Device CMYK has four-channel functions: `rgb_to_cmyk_with(rgb, bg,
+ucr)` takes the black-generation and undercolour-removal functions of
+ISO 32000-2 §10.4.2.4 (GCR / UCR strength), `rgb_to_cmyk` uses
+`BG(k) = UCR(k) = k`, and `cmyk_to_rgb` is §10.4.2.5. `delta_e2000`
+is the CIEDE2000 difference (CSS Color 4 §20.2).
+
+HSV hue is hexagonal, `S = (max − min) / max`, `V = max`. HSI hue is
+the angle of the colour's projection onto the `R + G + B = 0` plane,
+`atan2(√3·(G − B), 2R − G − B)`, with `S = 1 − min / I` and `I` the
+channel mean. HCL is hexagonal hue, chroma `max − min` and luma; HCLp
+converts the same way but its inverse pulls an out-of-gamut result
+toward the grey of the same luma until it fits (`hclp_to_rgb`). Every
+hue is in degrees; an achromatic colour's hue is 0.
+
+Where a name has competing definitions the table says which one is
+implemented: "HCL" is three different models here (`Hcl` is the
+hexagonal hue / chroma / luma triple, `HclAb` cylindrical CIELAB,
+`HclUv` cylindrical CIELUV); "YCbCr" is always H.273's, with explicit
+weights and range; Y′UV / Y′IQ / Y′DbDr are the analogue broadcast
+definitions on the 0.299 / 0.587 / 0.114 luma, exact inverses included.
+Out-of-gamut values are preserved everywhere (nothing clamps); the only
+exceptions are documented on the item: `hclp_to_rgb` pulls into gamut,
+the CMYK rules clamp to 0..1, and `CineonLog::encode` stops at code 0.
+
+Every model round-trips sRGB within ±1 LSB at 16 bits with the model
+values held as `f32` (`tests/colorspace_models.rs`). Against
+`magick -colorspace X` (Q16-HDRI float I/O, after ImageMagick's own
+channel scaling) the values agree within 1e-4 for RGB, Gray,
+LinearGray, XYZ, xyY, Lab, LCHab, Oklab, Oklch, HSL, HWB, CMY,
+Rec709YCbCr and LMS, within 1e-6 for HSV, HSB, HSI, HCL and HCLp,
+within 1e-5 for OHTA (the tool offsets its chroma by 32768 / 65535),
+and within 5e-4 for Rec601YCbCr / YPbPr / YIQ / YUV / YDbDr, where the
+tool's luma weights and three-decimal coefficients differ slightly from
+the standards' 0.299 / 0.587 / 0.114 and exact scale factors. Back to
+sRGB (`magick -set colorspace X -colorspace sRGB`) the hue models and
+LMS agree within 2e-7 and the television matrices within 2.5e-4 (ours
+is the exact inverse of the forward matrix).
+
+CIELUV, Jzazbz (with its green and blue inputs swapped back) and the
+Cineon log agree with the same black-box tool within 3e-4, 5e-6 and
+5e-5; PhotoYCC and the analogue-television matrices are checked
+against their defining constants (`tests/colorspace_models.rs`).
+
+### Buffers — `ModelConverter`
+
+`ColorModel::from_srgb` / `to_srgb` / `convert` work on one colour.
+`colorspace::ModelConverter` plans a conversion between any two models
+once (matrices derived and inverted at construction; two models on the
+same base domain fuse into a single 3 × 3 with no transfer function in
+between) and runs it over interleaved buffers:
+
+```rust
+use oxideav_pixfmt::colorspace::{ColorModel, GamutPolicy, LabWhite, ModelConverter};
+
+let to_lab = ModelConverter::new(ColorModel::Srgb, ColorModel::Lab(LabWhite::D50))
+    .with_channels(4)          // RGBA in, LabA out: extra channels are copied
+    .with_threads(4);          // serial unless asked; same output at any budget
+let rgba = vec![0.25f32; 4 * 1024];
+let mut lab = vec![0f32; rgba.len()];
+to_lab.convert_f32(&rgba, &mut lab)?;   // also convert_f64 / convert_u8 / convert_u16
+
+let back = ModelConverter::new(ColorModel::Lab(LabWhite::D50), ColorModel::Srgb)
+    .with_gamut(GamutPolicy::Clamp);    // default: Preserve
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+- **Float buffers** hold natural units and are exact: the sRGB transfer
+  function is evaluated per sample, nothing is clamped under
+  `GamutPolicy::Preserve` (out-of-gamut colours come back out of a round
+  trip unchanged), and `GamutPolicy::Clamp` limits the intermediate sRGB
+  value to 0..1 before it enters the destination model.
+- **Integer buffers** map each component's
+  `ColorModel::component_ranges()` interval onto the full code range,
+  round to nearest and saturate: unit components 0..1, hues 0..360°,
+  XYZ / LMS 0..2, `L*` 0..100 with `a*` / `b*` −128..127 (so 8-bit
+  `a* = code − 128`), `u*` −134..220, `v*` −140..122, Oklab / Jzazbz
+  `a`, `b` −0.5..0.5, scRGB the IEC 61966-2-2 rule
+  `code = 8192·v + 4096`. A plain sRGB source is linearised through an
+  exact per-code table; a plain sRGB destination is encoded through a
+  piecewise-linear table (nine binades × 128 chords) whose error is
+  below 2 × 10⁻⁶ — 0.13 of a 16-bit code (asserted in the unit tests).
+- **Threads**: `with_threads(n)` or
+  `with_execution(&ExecutionContext)`; the buffer is split into equal
+  parts on scoped threads.
+
+Speed, 1 MP of random in-gamut colours, Apple M4 Max, serial unless
+marked, best of three `cargo bench --features bench --bench
+colorspace_models` runs on a machine shared with other builds (the
+spread between runs was up to 2×). "Before" is the per-colour
+`ColorModel::convert` loop on `f64`, which was the only route:
+
+| conversion | per-colour loop | `convert_f32` | `convert_u8` | `convert_u16` | `convert_u8`, host threads |
+| ---------- | --------------- | ------------- | ------------ | ------------- | -------------------------- |
+| sRGB → linear sRGB | 55.5 ms | 35.6 ms | 5.1 ms | 5.7 ms | 1.0 ms |
+| linear sRGB → sRGB | 25.6 ms | 28.4 ms | 7.8 ms | 7.7 ms | 1.9 ms |
+| sRGB → XYZ | 36.3 ms | 29.6 ms | 4.8 ms | 5.4 ms | 1.1 ms |
+| sRGB → CIELAB (D50) | 83.9 ms | 54.5 ms | 13.9 ms | 16.4 ms | 2.4 ms |
+| CIELAB (D50) → sRGB | 165 ms | 44.6 ms | 20.8 ms | 27.5 ms | 2.8 ms |
+| sRGB → OkLCh | 107 ms | 116 ms | 55.3 ms | 71.6 ms | 7.4 ms |
+| sRGB → Y′CbCr (BT.709) | 8.6 ms | 2.4 ms | 3.9 ms | 4.2 ms | 0.7 ms |
+
+The float path keeps the exact transfer function (three `powf` per
+pixel), so where the transfer dominates it gains only what the planned
+matrices save; the integer paths replace it with the tables described
+above. At 12 MP: sRGB → XYZ 8-bit 52 ms serial / 8.1 ms threaded,
+CIELAB → sRGB 8-bit 148 ms / 21 ms, sRGB → Y′CbCr `f32` 31 ms / 4.4 ms.
+
+## ICC colour management (feature `icc`)
+
+```toml
+oxideav-pixfmt = { version = "0.1", features = ["icc"] }
+```
+
+`oxideav_pixfmt::icc` parses version 2 and version 4 ICC profiles and
+transforms pixels from one profile's device space to another's through
+the profile connection space. It is written from ICC.1:2022 (profile
+version 4.4, technically identical to ISO 15076-1) and adds no
+dependencies; the default build does not compile it.
+
+```rust,ignore
+use oxideav_pixfmt::icc::{IccProfile, IccTransform, RenderingIntent};
+
+let src = IccProfile::parse(&std::fs::read("in.icc")?)?;   // or IccProfile::srgb()
+let dst = IccProfile::parse(&std::fs::read("cmyk.icc")?)?;
+let t = IccTransform::new(&src, &dst, RenderingIntent::RelativeColorimetric)?;
+let rgb16: Vec<u16> = vec![65535, 0, 0, 0, 0, 65535];   // two pixels
+let mut cmyk16 = vec![0u16; 2 * t.output_channels()];
+t.transform_u16(&rgb16, &mut cmyk16)?;                  // also _u8, _f32, transform_pixel (f64)
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+| piece | coverage (ICC.1:2022 clause) |
+| ----- | ---------------------------- |
+| header, tag table | §7.2, §7.3; `description()` / `copyright()` for `mluc` / `text` |
+| matrix/TRC, grayTRC | Annex F.3 / F.2, with the Annex F.1 curve-inversion rules |
+| curves | `curv` (identity, gamma, sampled) and all five `para` functions (Table 68) |
+| LUT tags | `mft1`, `mft2` (legacy 16-bit PCSLAB, Tables 42/43), `mAB ` / `mBA ` with every permitted element combination, 8- and 16-bit CLUTs, per-dimension grids; multilinear CLUT interpolation |
+| PCS | PCSXYZ ↔ PCSLAB (§6.4, Annex A, negative-XYZ extension), every PCS encoding of §6.3.4 |
+| intents | perceptual, media-relative, saturation, ICC-absolute (§6.2.3 white scaling; display media white = PCS white, §9.2.36); §8.10.2 tag fallback order |
+| device spaces | RGB, CMYK, Gray, Lab, XYZ, n-colour (anything a LUT carries) |
+| perceptual black | opt-in `TransformOptions::with_legacy_perceptual_black(true)`: the §6.3.4.3 adjustment `Xp = Xt·(1 − Xb / Xi) + Xb` (Table 16 black, PCS white fixed) out of / into the perceptual tables of pre-version-4 profiles |
+| float tags | `DToB0..3` / `BToD0..3` (`mpet`, §10.16): segmented curves (`parf` types 0–2, `samf`), `matf`, float `clut`, `bACS` / `eACS`; unclipped, ahead of the integer tags (§8.10.2 a); DToB3 / BToD3 already ICC-absolute); an unknown element sends the profile back to its integer tags; `has_float_to_pcs` / `has_float_from_pcs` |
+| chains | `IccTransform::chain(&[&a, &abstract, &proof, &b], opts)`: Abstract profiles (§8.8; DToB0 / AToB0 PCS → PCS, Lab or XYZ in and out) and device profiles passed through in the middle; ICC-absolute rescales at every step into a device profile |
+| DeviceLink | `IccTransform::device_link(&p)` runs a link's `DToB0` (§8.10.3 a) or `AToB0` directly (§8.6) |
+| frames | `icc::transform_frame` over packed `Gray8` / `Ya8` / `Gray16Le` / `Ya16Le` / `GrayF32Le` / `Rgb24` / `Rgba` / `Rgb48Le` / `Rgba64Le` / `RgbF32Le` / `RgbaF32Le` / `Cmyk` / `CmykInverted` (alpha carried or synthesised, the ICC blob replaced); `icc::frame_profile` parses a frame's `BlobKind::ICC` |
+| CLUT interpolation | `TransformOptions::with_interpolation`: `ClutInterpolation::Multilinear` (default, all `2^n` cell corners) or `Tetrahedral` (simplex: `n + 1` corners along the cell diagonal, for any number of inputs) on `mft1` / `mft2` / `mAB ` / `mBA ` tables; both reproduce grid points exactly |
+| precomputed tables | `IccTransform::precompute(grid)`: any transform (matrix/TRC, CLUT, float tags, chains, DeviceLinks; 1–4 input channels) sampled on a regular grid into an in-memory device link, then run by simplex interpolation on `f32` — 8-bit, 16-bit and float buffers; `is_precomputed()` |
+| speed | first-stage curves tabulated per input code on 8-bit and large 16-bit buffers; `TransformOptions::with_threads(n)` / `with_execution(&ExecutionContext)` split buffers over scoped threads with identical output (serial by default) |
+| writing | `IccProfileBuilder` (header, tag table, `XYZ `, `curv` / `para`, `mluc`, `sf32`, B-curve `mAB ` / `mBA `) |
+| built-in profiles | `srgb()`, `display_p3()`, `adobe_rgb()`, `rec2020()`, `prophoto()` (v4 matrix/TRC, Bradford-adapted to D50 per Annex E), `gray(curve)`, `lab_d50()` |
+
+Agreement with `magick in -profile a.icc -profile b.icc` (ImageMagick
+7.1.2 Q16-HDRI, 16-bit raw pixels, all four intents; CIEDE2000 from CSS
+Color 4 §20.2, measured in the destination profile's PCSLAB):
+
+| profile pairs | max ΔE2000 | mean |
+| ------------- | ---------- | ---- |
+| synthesized sRGB / P3 / Adobe RGB / BT.2020 / ProPhoto, all pairs | 0.003 | < 0.002 |
+| macOS system RGB / Gray matrix profiles, all pairs and intents | 0.036 | < 0.025 |
+| into Generic CMYK (8-bit `mft1`), all intents | 0.007 | 0.002 |
+| synthesized `mAB ` (8/16-bit CLUT) / `mft2` / 4-D CMYK LUT profiles, both directions | 0.25 | — |
+| out of Generic CMYK (9-point 4-D `mft1`) | 1.19 (deep shadows) | 0.063 |
+| synthesized `mpet` profiles (formula / sampled curves, float CLUT) ↔ Display P3 | ≤ 2 / 65535 codes | — |
+| chain sRGB → BT.2020 → Adobe RGB (`-profile` ×3) | ≤ 1 / 65535 codes | — |
+
+On the CMYK CLUT's grid nodes the two agree to one 16-bit code; the
+remaining gap is between nodes, where ICC.1 prescribes "linear
+interpolation" without fixing the simplex scheme.
+
+With `ClutInterpolation::Tetrahedral` the same CMYK pairs agree within
+0.41 ΔE2000 (multilinear: 1.19), so every system-profile pair is below
+1.
+
+A precomputed table is an approximation between its grid points. Against
+the exact transform, over 20 000 random 16-bit colours
+(`tests/icc_lut_profiles.rs`):
+
+| transform | table | max ΔE2000 | mean |
+| --------- | ----- | ---------- | ---- |
+| sRGB → Display P3 | 17³ | 0.26 | 0.019 |
+| sRGB → Display P3 | 33³ | 0.10 | 0.005 |
+| sRGB → Display P3 | 65³ | 0.031 | 0.0015 |
+| sRGB → synthesized CMYK (`mBA `) | 33³ | 0.52 | — |
+| synthesized CMYK (`mAB `) → sRGB | 17⁴ | 1.76 | 0.067 |
+
+At 8 bits the 33³ sRGB → P3 table is within one code of the exact path.
+
+Speed, 1 MP, Apple M4 Max, one `cargo bench --features bench,icc
+--bench icc_transform` run on a machine shared with other builds
+(serial unless marked; "exact" is the transform as built, which was the
+only route):
+
+| transform | exact, 8-bit | precomputed table, 8-bit | table, 16-bit | table, `f32` | table, 8-bit, host threads | table build |
+| --------- | ------------ | ------------------------ | ------------- | ------------ | -------------------------- | ----------- |
+| sRGB → Display P3 (matrix/TRC), 33³ | 98 ms | 22.7 ms | 40.4 ms | 30.5 ms | 4.0 ms | 3.4 ms |
+| sRGB → Generic CMYK (`mft1`), 33³ | 118 ms | 28.7 ms | 44.4 ms | 36.7 ms | 4.6 ms | 6.0 ms |
+| Generic CMYK → sRGB (4-D `mft1`), 17⁴ | 294 ms | 36.6 ms | 35.9 ms | 31.6 ms | 4.4 ms | 16.5 ms |
+
+Tetrahedral interpolation alone takes the exact Generic CMYK → sRGB
+8-bit transform from 294 to 171 ms (5 table reads per pixel instead of
+16). At 12 MP sRGB → Display P3 8-bit runs in 1.04 s exact, 284 ms
+through the table and 28 ms through the table on the host's threads.
+
+Not covered: black-point compensation (ICC.1:2022 does not define it —
+its algorithm is ISO 18619, which is not among the project's reference
+documents), NamedColor profiles and DeviceLinks inside a chain.
 
 ## Performance
 
@@ -491,6 +818,68 @@ instead of copied, RGBA interleaved in the decode pass, RGBA input
 split a few rows at a time), the exact NEON encoder, and the one-pass
 deep matrix for 10/12-bit sources.
 
+**Depth-preserving routes, 12-megapixel still (4032×3024), Apple M4
+Max (`cargo bench --features bench --bench deep_gray_12mp`).** "before"
+is the route the planner took before round 476 — two `convert` calls
+staged through `Gray8` (or `Yuv444P16Le` for the last row) — measured
+in the same binary; "serial" / "threaded" are the direct rows.
+
+| conversion                   | before (staged) | serial   | threaded |
+| ---------------------------- | --------------- | -------- | -------- |
+| `Gray16Le → Rgb48Le`         | 2.54 ms         | 1.05 ms  | 0.70 ms  |
+| `Rgb48Le → Gray16Le`         | 19.0 ms         | 13.7 ms  | 1.84 ms  |
+| `Yuv444P16Le → Gray16Le`     | 3.18 ms         | 3.30 ms  | 0.61 ms  |
+| `Yuv420P16Le → Gray16Le`     | 3.25 ms         | 3.56 ms  | 0.76 ms  |
+| `Gray16Le → Yuv444P16Le`     | 3.87 ms         | 4.67 ms  | 1.71 ms  |
+| `Gray16Le → Yuv420P10Le`     | 3.29 ms         | 3.87 ms  | 0.80 ms  |
+| `Rgb48Le → Yuv420P16Le`      | —               | 25.1 ms  | 2.94 ms  |
+| `Rgb48Le → Yuv420P10Le`      | 29.4 ms         | 27.8 ms  | 5.78 ms  |
+| `Gbrp16Le → Gray16Le`        | 38.9 ms         | 10.4 ms  | 1.78 ms  |
+| `Gray16Le → Gbrp16Le`        | 16.0 ms         | 0.99 ms  | 0.98 ms  |
+| `Gbrp10Le → Yuv420P10Le`     | 49.9 ms (via `Rgba64Le`) | 47.9 ms (via `Rgb48Le`) | 8.96 ms |
+
+The "before" rows were 8-bit routes (cheap because they threw the low
+byte away before the range move); the direct rows keep all 16 bits —
+the luma move is one composed table lookup per sample, the packed rows
+run the Q30 matrix — on the row-band engine. The 8-bit headline rows
+above were re-measured in the same session and are unchanged. The
+`Gbrp10Le → Yuv420P10Le` row is still staged (two banded legs through
+`Rgb48Le`); a fused GBR → YUV encode is the next step for that family.
+
+**Packed RGB tier, 12-megapixel still (4032×3024), Apple M4 Max
+(`cargo bench --features bench --bench packed_rgb_12mp`).** The word
+kernels are monomorphised on the green width and both byte orders so
+the interleaved loads / stores vectorise; "serial" is `convert()`,
+"threaded" is `convert_with` + `ExecutionContext::auto()`; the staged
+rows pivot through `Rgb24`. The ordered dither runs on row bands too
+(its threshold depends on the picture position only); error diffusion
+is a single sequential pass by construction.
+
+| conversion                       | serial   | threaded |
+| -------------------------------- | -------- | -------- |
+| `Rgb565Le → Rgb24`               | 1.22 ms  | 0.51 ms  |
+| `Rgb565Le → Rgba`                | 1.58 ms  | 0.60 ms  |
+| `Rgb565Le → Bgra`                | 1.63 ms  | 0.58 ms  |
+| `Rgb565Le → Rgb555Be`            | 2.13 ms  | 0.55 ms  |
+| `Rgb24 → Rgb565Le`               | 1.30 ms  | 0.56 ms  |
+| `Rgba → Rgb565Le`                | 4.28 ms  | 0.84 ms  |
+| `Rgb565Le → Yuv420P` (staged)    | 4.81 ms  | 1.02 ms  |
+| `Yuv420P → Rgb565Le` (staged)    | 4.84 ms  | 1.04 ms  |
+| `Bgrx → Rgba`                    | 3.08 ms  | 0.71 ms  |
+| `Bgrx → Rgb24`                   | 2.57 ms  | 0.57 ms  |
+| `Rgba → Bgrx`                    | 2.86 ms  | 0.67 ms  |
+| `Rgb24 → Bgrx`                   | 1.21 ms  | 0.52 ms  |
+| `Bgrx → Yuv420P`                 | 6.48 ms  | 1.40 ms  |
+| `Yuv420P → Bgrx`                 | 4.88 ms  | 1.23 ms  |
+| `Rgb24 → Rgb565Le`, `Bayer8x8`   | 13.7 ms  | 1.82 ms  |
+| `Rgb24 → Rgb565Le`, `FloydSteinberg` | 72.4 ms | —      |
+
+The same pass moved the historical packed rows (swizzles, 3 ↔ 4
+promote / demote, grey broadcast, every `packed_map` row) onto the
+banded driver — byte-identical, threaded under an execution budget —
+and made the scalar 3 → 4 promote branch-free (`Rgb24 → Rgba` 10.1 →
+1.2 ms serial on aarch64).
+
 **Porter-Duff compositing (scalar, Apple M-series single core, indicative):**
 
 | operation                           | scalar throughput |
@@ -543,6 +932,9 @@ cargo bench --features bench --bench pixel_ops          # RGB swizzle, NV12, chr
 cargo bench --features bench --bench alpha              # Porter-Duff over/blit/premultiply
 cargo bench --features bench --bench depth_gray        # bit-depth ladder + RGB→Gray8 projection
 cargo bench --features bench --bench heif_12mp         # 12 MP still: the production-HEIF conversion set through convert()
+cargo bench --features bench --bench deep_gray_12mp    # 12 MP still: the depth-preserving grey / packed-16 / 16-bit YUV routes, before and after
+cargo bench --features bench --bench colorspace_models # colour-model buffers (8 / 16-bit / f32, 1 MP and 12 MP) next to the per-colour loop
+cargo bench --features bench,icc --bench icc_transform # ICC transforms: exact, tetrahedral and precomputed-table paths
 OXIDEAV_PIXFMT_FORCE_SCALAR=1 cargo bench --features bench  # scalar baseline for comparison
 ```
 
@@ -563,7 +955,8 @@ A [`cargo-fuzz`](https://github.com/rust-fuzz/cargo-fuzz) harness lives
 under [`fuzz/`](fuzz/) and runs daily in CI. The `convert_geometry`
 target does not feed arbitrary bytes at a parser — there is none. It
 instead *constructs* a structurally-valid source frame from the fuzzer's
-input (a source pixel format — all 70 enum variants are buildable,
+input (a source pixel format — all 82 enum variants are buildable,
+the 16-bit words at odd offsets on padded strides,
 small / odd dimensions, extra stride padding, and optional hostile
 side-channel records: fuzz-length palettes on `Pal8` and
 significant-bits records with zero bits, above-nominal values, and
@@ -582,8 +975,18 @@ one (must be rejected), and the sweep also drives `convert_with` with
 fuzz-chosen thread budgets and colour-signal overrides (range, and
 matrix code points including identity and reserved values).
 
+Two byte-stream targets cover the ICC module: `icc_profile` feeds
+arbitrary bytes to `IccProfile::parse` and transforms between whatever
+parses; `icc_transform` adds fuzz-chosen options (rendering intent,
+CLUT interpolation, thread budget, precomputed-table grid) and uses the
+parsed profile as source, destination, the middle of a chain and as a
+DeviceLink, through the per-pixel, 8-bit, 16-bit and float paths (with
+non-finite and out-of-range samples) and through a precomputed table.
+
 ```sh
 cargo +nightly fuzz run convert_geometry
+cargo +nightly fuzz run icc_profile
+cargo +nightly fuzz run icc_transform
 ```
 
 ## License

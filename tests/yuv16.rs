@@ -23,7 +23,7 @@ use oxideav_core::{PixelFormat, VideoFrame, VideoPlane};
 use oxideav_pixfmt::yuv::{
     depth_down_le16_plane, depth_rescale_le16_plane, depth_up_8_to_le16_plane,
 };
-use oxideav_pixfmt::{convert, supports, supports_direct, ConvertOptions, FrameInfo};
+use oxideav_pixfmt::{ConvertOptions, FrameInfo, convert, supports, supports_direct};
 
 fn rd16(buf: &[u8], i: usize) -> u16 {
     (buf[i * 2] as u16) | ((buf[i * 2 + 1] as u16) << 8)
@@ -358,10 +358,9 @@ fn convert_depth_16_roundtrip_all_subsamplings() {
         let deep = convert(&src, FrameInfo::new(fmt8, w, h), fmt16, &opts).expect("8 → 16");
         // Exact ×257 widening on every plane.
         for p in 0..3 {
-            let n = src.planes[p].data.len();
-            for i in 0..n {
+            for (i, &narrow) in src.planes[p].data.iter().enumerate() {
                 let got = rd16(&deep.planes[p].data, i) as u32;
-                assert_eq!(got, src.planes[p].data[i] as u32 * 257);
+                assert_eq!(got, narrow as u32 * 257);
             }
         }
         let back = convert(&deep, FrameInfo::new(fmt16, w, h), fmt8, &opts).expect("16 → 8");
@@ -448,9 +447,9 @@ fn staged_deep_pivot_preserves_luma_precision() {
     // Same reasoning down to the 8-bit sibling at a different
     // subsampling: luma must be exactly the high byte.
     let out8 = convert(&src, info, PixelFormat::Yuv422P, &opts).expect("420P16 → 422P");
-    for i in 0..w * h {
+    for (i, &got) in out8.planes[0].data.iter().enumerate().take(w * h) {
         let want = (rd16(&src.planes[0].data, i) >> 8) as u8;
-        assert_eq!(out8.planes[0].data[i], want, "luma sample {i}");
+        assert_eq!(got, want, "luma sample {i}");
     }
 }
 
@@ -494,7 +493,9 @@ fn cross_depth_cross_subsampling_closure() {
                 stride: p.stride,
                 data: p
                     .data
-                    .chunks_exact(2)
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
                     .flat_map(|c| (u16::from_le_bytes([c[0], c[1]]) & 0x3FF).to_le_bytes())
                     .collect(),
             })

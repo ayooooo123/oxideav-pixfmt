@@ -120,7 +120,7 @@ pub(crate) fn row_bands(h: usize, hsub: usize, workers: usize) -> Vec<(usize, us
 /// scoped threads, one per band, and joined before returning. The
 /// caller has already carved every band's output into disjoint `&mut`
 /// slices, so the closure receives only its own band's state.
-fn run_bands<T, F>(mut bands: Vec<T>, f: F)
+pub(crate) fn run_bands<T, F>(mut bands: Vec<T>, f: F)
 where
     T: Send,
     F: Fn(T) + Sync,
@@ -141,6 +141,69 @@ where
             f(b);
         }
     });
+}
+
+/// Map a tight packed buffer of `h` rows (`src_row` bytes each) to a
+/// tight packed output (`dst_row` bytes per row), splitting the rows
+/// into at most `workers` bands that run on scoped threads (see
+/// [`run_bands`]). `f(src_band, dst_band)` always receives whole rows
+/// — `dst_band.len() / dst_row` of them — so a per-pixel kernel can run
+/// over the band as one contiguous stretch of pixels.
+pub(crate) fn map_packed_banded<F>(
+    src: &[u8],
+    src_row: usize,
+    dst_row: usize,
+    h: usize,
+    workers: usize,
+    f: F,
+) -> Vec<u8>
+where
+    F: Fn(&[u8], &mut [u8]) + Sync,
+{
+    let mut out = vec![0u8; dst_row * h];
+    if h == 0 || dst_row == 0 {
+        return out;
+    }
+    let bands = row_bands(h, 1, workers);
+    let mut jobs = Vec::with_capacity(bands.len());
+    let mut rest: &mut [u8] = &mut out;
+    for &(r0, r1) in &bands {
+        let (band, tail) = rest.split_at_mut((r1 - r0) * dst_row);
+        rest = tail;
+        jobs.push((&src[r0 * src_row..r1 * src_row], band));
+    }
+    run_bands(jobs, |(s, d): (&[u8], &mut [u8])| f(s, d));
+    out
+}
+
+/// [`map_packed_banded`] whose kernel also receives the band's first
+/// row index — for per-pixel maps that depend on the row (an ordered
+/// dither threshold) but not on neighbouring rows.
+pub(crate) fn map_packed_banded_rows<F>(
+    src: &[u8],
+    src_row: usize,
+    dst_row: usize,
+    h: usize,
+    workers: usize,
+    f: F,
+) -> Vec<u8>
+where
+    F: Fn(&[u8], &mut [u8], usize) + Sync,
+{
+    let mut out = vec![0u8; dst_row * h];
+    if h == 0 || dst_row == 0 {
+        return out;
+    }
+    let bands = row_bands(h, 1, workers);
+    let mut jobs = Vec::with_capacity(bands.len());
+    let mut rest: &mut [u8] = &mut out;
+    for &(r0, r1) in &bands {
+        let (band, tail) = rest.split_at_mut((r1 - r0) * dst_row);
+        rest = tail;
+        jobs.push((&src[r0 * src_row..r1 * src_row], band, r0));
+    }
+    run_bands(jobs, |(s, d, r0): (&[u8], &mut [u8], usize)| f(s, d, r0));
+    out
 }
 
 /// Interleave a tight RGB24 row with an alpha row (or opaque alpha)
@@ -169,8 +232,10 @@ fn rgb_row_to_rgba_scalar(rgb: &[u8], alpha: Option<&[u8]>, dst: &mut [u8], w: u
         Some(a) => {
             let a = &a[..w];
             for ((d, s), &av) in dst
-                .chunks_exact_mut(4)
-                .zip(rgb.chunks_exact(3))
+                .as_chunks_mut::<4>()
+                .0
+                .iter_mut()
+                .zip(rgb.as_chunks::<3>().0)
                 .zip(a.iter())
             {
                 d[0] = s[0];
@@ -180,7 +245,12 @@ fn rgb_row_to_rgba_scalar(rgb: &[u8], alpha: Option<&[u8]>, dst: &mut [u8], w: u
             }
         }
         None => {
-            for (d, s) in dst.chunks_exact_mut(4).zip(rgb.chunks_exact(3)) {
+            for (d, s) in dst
+                .as_chunks_mut::<4>()
+                .0
+                .iter_mut()
+                .zip(rgb.as_chunks::<3>().0)
+            {
                 d[0] = s[0];
                 d[1] = s[1];
                 d[2] = s[2];
@@ -193,29 +263,31 @@ fn rgb_row_to_rgba_scalar(rgb: &[u8], alpha: Option<&[u8]>, dst: &mut [u8], w: u
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
 unsafe fn rgb_row_to_rgba_neon(rgb: &[u8], alpha: Option<&[u8]>, dst: &mut [u8], w: usize) {
-    use core::arch::aarch64::*;
-    let rgb = &rgb[..w * 3];
-    let dst = &mut dst[..w * 4];
-    let full = w / 16;
-    let opaque = vdupq_n_u8(255);
-    for i in 0..full {
-        let s = rgb.as_ptr().add(i * 48);
-        let d = dst.as_mut_ptr().add(i * 64);
-        let px = vld3q_u8(s);
-        let a = match alpha {
-            Some(a) => vld1q_u8(a.as_ptr().add(i * 16)),
-            None => opaque,
-        };
-        vst4q_u8(d, uint8x16x4_t(px.0, px.1, px.2, a));
-    }
-    let done = full * 16;
-    if done < w {
-        rgb_row_to_rgba_scalar(
-            &rgb[done * 3..],
-            alpha.map(|a| &a[done..]),
-            &mut dst[done * 4..],
-            w - done,
-        );
+    unsafe {
+        use core::arch::aarch64::*;
+        let rgb = &rgb[..w * 3];
+        let dst = &mut dst[..w * 4];
+        let full = w / 16;
+        let opaque = vdupq_n_u8(255);
+        for i in 0..full {
+            let s = rgb.as_ptr().add(i * 48);
+            let d = dst.as_mut_ptr().add(i * 64);
+            let px = vld3q_u8(s);
+            let a = match alpha {
+                Some(a) => vld1q_u8(a.as_ptr().add(i * 16)),
+                None => opaque,
+            };
+            vst4q_u8(d, uint8x16x4_t(px.0, px.1, px.2, a));
+        }
+        let done = full * 16;
+        if done < w {
+            rgb_row_to_rgba_scalar(
+                &rgb[done * 3..],
+                alpha.map(|a| &a[done..]),
+                &mut dst[done * 4..],
+                w - done,
+            );
+        }
     }
 }
 
@@ -243,8 +315,10 @@ fn rgba_row_split_scalar(src: &[u8], rgb: &mut [u8], alpha: Option<&mut [u8]>, w
         Some(a) => {
             let a = &mut a[..w];
             for ((s, d), av) in src
-                .chunks_exact(4)
-                .zip(rgb.chunks_exact_mut(3))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .zip(rgb.as_chunks_mut::<3>().0)
                 .zip(a.iter_mut())
             {
                 d[0] = s[0];
@@ -254,7 +328,12 @@ fn rgba_row_split_scalar(src: &[u8], rgb: &mut [u8], alpha: Option<&mut [u8]>, w
             }
         }
         None => {
-            for (s, d) in src.chunks_exact(4).zip(rgb.chunks_exact_mut(3)) {
+            for (s, d) in src
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .zip(rgb.as_chunks_mut::<3>().0)
+            {
                 d[0] = s[0];
                 d[1] = s[1];
                 d[2] = s[2];
@@ -266,24 +345,26 @@ fn rgba_row_split_scalar(src: &[u8], rgb: &mut [u8], alpha: Option<&mut [u8]>, w
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
 unsafe fn rgba_row_split_neon(src: &[u8], rgb: &mut [u8], alpha: Option<&mut [u8]>, w: usize) {
-    use core::arch::aarch64::*;
-    let full = w / 16;
-    let mut alpha = alpha;
-    for i in 0..full {
-        let px = vld4q_u8(src.as_ptr().add(i * 64));
-        vst3q_u8(rgb.as_mut_ptr().add(i * 48), uint8x16x3_t(px.0, px.1, px.2));
-        if let Some(a) = alpha.as_deref_mut() {
-            vst1q_u8(a.as_mut_ptr().add(i * 16), px.3);
+    unsafe {
+        use core::arch::aarch64::*;
+        let full = w / 16;
+        let mut alpha = alpha;
+        for i in 0..full {
+            let px = vld4q_u8(src.as_ptr().add(i * 64));
+            vst3q_u8(rgb.as_mut_ptr().add(i * 48), uint8x16x3_t(px.0, px.1, px.2));
+            if let Some(a) = alpha.as_deref_mut() {
+                vst1q_u8(a.as_mut_ptr().add(i * 16), px.3);
+            }
         }
-    }
-    let done = full * 16;
-    if done < w {
-        rgba_row_split_scalar(
-            &src[done * 4..],
-            &mut rgb[done * 3..],
-            alpha.map(|a| &mut a[done..]),
-            w - done,
-        );
+        let done = full * 16;
+        if done < w {
+            rgba_row_split_scalar(
+                &src[done * 4..],
+                &mut rgb[done * 3..],
+                alpha.map(|a| &mut a[done..]),
+                w - done,
+            );
+        }
     }
 }
 
@@ -607,20 +688,20 @@ pub(crate) struct PlanarDeep<'a> {
 /// for words), masking stray high bits first — the exact mapping of
 /// `yuv::depth_up_8_to_le16_plane` / `yuv::depth_rescale_le16_plane`.
 #[inline]
-fn widen_row16(src: &[u8], dst: &mut [u16], bits: u32) {
+pub(crate) fn widen_row16(src: &[u8], dst: &mut [u16], bits: u32) {
     if bits <= 8 {
         for (d, &v) in dst.iter_mut().zip(src.iter()) {
             *d = ((v as u16) << 8) | v as u16;
         }
     } else if bits >= 16 {
-        for (d, b) in dst.iter_mut().zip(src.chunks_exact(2)) {
+        for (d, b) in dst.iter_mut().zip(src.as_chunks::<2>().0) {
             *d = u16::from_le_bytes([b[0], b[1]]);
         }
     } else {
         let mask = (1u32 << bits) - 1;
         let sh = 16 - bits;
         let back = bits - sh;
-        for (d, b) in dst.iter_mut().zip(src.chunks_exact(2)) {
+        for (d, b) in dst.iter_mut().zip(src.as_chunks::<2>().0) {
             let v = u16::from_le_bytes([b[0], b[1]]) as u32 & mask;
             *d = ((v << sh) | (v >> back)) as u16;
         }
@@ -677,10 +758,8 @@ pub(crate) fn decode_deep(
                 widen_row16(&src.v[cr * cw * sb..(cr + 1) * cw * sb], &mut v16r, bits);
                 staged_cr = cr;
             }
-            if alpha_out {
-                if let Some(a) = src.a {
-                    widen_row16(&a[row * w * sb..(row + 1) * w * sb], &mut a16, bits);
-                }
+            if alpha_out && let Some(a) = src.a {
+                widen_row16(&a[row * w * sb..(row + 1) * w * sb], &mut a16, bits);
             }
             for (col, px) in drow.chunks_exact_mut(bpp).enumerate() {
                 let ci = col / wsub;
@@ -695,6 +774,160 @@ pub(crate) fn decode_deep(
         }
     });
     out
+}
+
+// ---------------------------------------------------------------------
+// Packed 16-bit RGB(A) → 16-bit planar YUV(A) (the Q30 deep matrix).
+
+/// Tight packed 16-bit RGB(A) source for [`encode_deep`]: `comps` LE16
+/// words per pixel (3 or 4), R, G, B first.
+pub(crate) struct PackedDeep<'a> {
+    pub data: &'a [u8],
+    pub comps: usize,
+    pub w: usize,
+    pub h: usize,
+}
+
+/// One [`encode_deep`] band: `(first row, row count, Y band, U band, V
+/// band, alpha band)`.
+type EncodeBand<'a> = (
+    usize,
+    usize,
+    &'a mut [u8],
+    &'a mut [u8],
+    &'a mut [u8],
+    Option<&'a mut [u8]>,
+);
+
+/// Tight 16-bit planar output of [`encode_deep`].
+pub(crate) struct PlanarDeepOut {
+    pub y: Vec<u8>,
+    pub u: Vec<u8>,
+    pub v: Vec<u8>,
+    pub a: Option<Vec<u8>>,
+    pub cw: usize,
+    pub ch: usize,
+}
+
+/// Packed 16-bit RGB(A) → 16-bit planar YUV(A) at `wsub` × `hsub`
+/// siting through the full-precision Q30 deep matrix, row-banded like
+/// [`decode_deep`]. Each band encodes its rows at 4:4:4 into a band
+/// scratch and subsamples the chroma with the crate's 16-bit kernels
+/// (`yuv::chroma16le_444_to_*`), so the planes are sample-for-sample
+/// what a whole-frame encode followed by a whole-frame subsample
+/// produces: band boundaries fall on multiples of `hsub`, so every
+/// vertical chroma pair stays inside one band. A carried alpha word is
+/// copied verbatim into the alpha plane when `alpha_out` and the
+/// source has one; `alpha_out` without a source alpha word synthesises
+/// opaque 65535.
+pub(crate) fn encode_deep(
+    src: &PackedDeep<'_>,
+    wsub: usize,
+    hsub: usize,
+    alpha_out: bool,
+    matrix: YuvMatrix,
+    workers: usize,
+) -> PlanarDeepOut {
+    let (w, h, comps) = (src.w, src.h, src.comps);
+    let (cw, ch) = chroma_dims(w, h, wsub, hsub);
+    let mut y = vec![0u8; w * h * 2];
+    let mut u = vec![0u8; cw * ch * 2];
+    let mut v = vec![0u8; cw * ch * 2];
+    let mut a = alpha_out.then(|| vec![0u8; w * h * 2]);
+    if w == 0 || h == 0 {
+        return PlanarDeepOut { y, u, v, a, cw, ch };
+    }
+    let p = matrix.encode_params16();
+    let bands = row_bands(h, hsub, workers);
+    let mut jobs = Vec::with_capacity(bands.len());
+    let (mut yr, mut ur, mut vr): (&mut [u8], &mut [u8], &mut [u8]) = (&mut y, &mut u, &mut v);
+    let mut ar: Option<&mut [u8]> = a.as_deref_mut();
+    for &(r0, r1) in &bands {
+        let n = r1 - r0;
+        let cn = r1.div_ceil(hsub) - r0 / hsub;
+        let (yb, yt) = yr.split_at_mut(n * w * 2);
+        yr = yt;
+        let (ub, ut) = ur.split_at_mut(cn * cw * 2);
+        ur = ut;
+        let (vb, vt) = vr.split_at_mut(cn * cw * 2);
+        vr = vt;
+        let ab = ar.take().map(|rest| {
+            let (band, tail) = rest.split_at_mut(n * w * 2);
+            ar = Some(tail);
+            band
+        });
+        jobs.push((r0, n, yb, ub, vb, ab));
+    }
+    let rowbytes = w * comps * 2;
+    run_bands(jobs, |(r0, n, yb, ub, vb, ab): EncodeBand<'_>| {
+        let full = wsub == 1 && hsub == 1;
+        // 4:4:4 chroma for the band: straight into the output when
+        // the target is 4:4:4, else into a band scratch.
+        let mut u444 = if full {
+            Vec::new()
+        } else {
+            vec![0u8; n * w * 2]
+        };
+        let mut v444 = if full {
+            Vec::new()
+        } else {
+            vec![0u8; n * w * 2]
+        };
+        let mut alpha_rows = ab;
+        for i in 0..n {
+            let row = &src.data[(r0 + i) * rowbytes..(r0 + i + 1) * rowbytes];
+            let yrow = &mut yb[i * w * 2..(i + 1) * w * 2];
+            let (urow, vrow) = if full {
+                (
+                    &mut ub[i * w * 2..(i + 1) * w * 2],
+                    &mut vb[i * w * 2..(i + 1) * w * 2],
+                )
+            } else {
+                (
+                    &mut u444[i * w * 2..(i + 1) * w * 2],
+                    &mut v444[i * w * 2..(i + 1) * w * 2],
+                )
+            };
+            for col in 0..w {
+                let px = &row[col * comps * 2..];
+                let r = u16::from_le_bytes([px[0], px[1]]);
+                let g = u16::from_le_bytes([px[2], px[3]]);
+                let b = u16::from_le_bytes([px[4], px[5]]);
+                let (yy, cb, cr) = yuv::rgb48_to_yuv16_fp(r, g, b, &p);
+                yrow[col * 2..col * 2 + 2].copy_from_slice(&yy.to_le_bytes());
+                urow[col * 2..col * 2 + 2].copy_from_slice(&cb.to_le_bytes());
+                vrow[col * 2..col * 2 + 2].copy_from_slice(&cr.to_le_bytes());
+            }
+            if let Some(arows) = alpha_rows.as_deref_mut() {
+                let arow = &mut arows[i * w * 2..(i + 1) * w * 2];
+                if comps == 4 {
+                    for col in 0..w {
+                        let px = &row[col * comps * 2 + 6..col * comps * 2 + 8];
+                        arow[col * 2..col * 2 + 2].copy_from_slice(px);
+                    }
+                } else {
+                    arow.fill(0xFF);
+                }
+            }
+        }
+        match (wsub, hsub) {
+            (1, 1) => {}
+            (2, 1) => {
+                yuv::chroma16le_444_to_422(&u444, ub, w, n);
+                yuv::chroma16le_444_to_422(&v444, vb, w, n);
+            }
+            (2, 2) => {
+                yuv::chroma16le_444_to_420(&u444, ub, w, n);
+                yuv::chroma16le_444_to_420(&v444, vb, w, n);
+            }
+            (1, 2) => {
+                yuv::chroma16le_444_to_440(&u444, ub, w, n);
+                yuv::chroma16le_444_to_440(&v444, vb, w, n);
+            }
+            _ => unreachable!("encode_deep: unsupported siting {wsub}x{hsub}"),
+        }
+    });
+    PlanarDeepOut { y, u, v, a, cw, ch }
 }
 
 #[cfg(test)]
@@ -768,7 +1001,7 @@ mod tests {
             assert_eq!(a2, alpha);
             let mut opaque = vec![0u8; w * 4];
             rgb_row_to_rgba(&rgb, None, &mut opaque, w);
-            assert!(opaque.chunks_exact(4).all(|p| p[3] == 255));
+            assert!(opaque.as_chunks::<4>().0.iter().all(|p| p[3] == 255));
         }
     }
 }

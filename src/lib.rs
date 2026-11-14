@@ -39,6 +39,16 @@
 //! directly; 0 (identity) routes the planes as G, B, R through the
 //! planar GBR family; an unsignalled frame behaves exactly as before.
 //!
+//! # Colour spaces and ICC profiles
+//!
+//! [`colorspace`] holds floating-point colour models (linear sRGB, XYZ,
+//! xyY, CIELAB / LCh, Oklab / OkLCh, HSL, HWB, CMY / CMYK, gray,
+//! Y′PbPr / Y′CbCr) and colorimetry (RGB primaries → XYZ, Bradford
+//! adaptation, CIEDE2000). With the `icc` feature,
+//! `icc` parses ICC v2 / v4 profiles and builds profile-to-profile
+//! transforms (matrix/TRC, grayTRC, `mft1` / `mft2` / `mAB ` / `mBA `
+//! LUTs, all four rendering intents).
+//!
 //! # Odd dimensions
 //!
 //! Every subsampled planar / semi-planar layout accepts odd widths and
@@ -69,6 +79,14 @@
 //! is supported; the first-tier matrix is:
 //!
 //! - RGB family (Rgb24/Bgr24/Rgba/Bgra/Argb/Abgr) all-to-all.
+//! - **Packed 16-bit RGB words** (`Rgb555Le/Be` / `Bgr555Le/Be` /
+//!   `Rgb565Le/Be` / `Bgr565Le/Be`, core 0.1.41) and the **padded
+//!   32-bit** `Rgbx` / `Bgrx` / `Xrgb` / `Xbgr`: direct ↔ the six 8-bit
+//!   orders, each other, `Gray8` and `Pal8`; the padded four also direct
+//!   ↔ every planar YUV(A) family member. 5 / 6 → 8 bits by replication,
+//!   8 → 5 / 6 by truncation (exact round trips), the 5-5-5 top bit and
+//!   the padding byte written 0 and never read; the way into a word
+//!   honours [`ConvertOptions::dither`]. See [`packed16`].
 //! - Yuv420P/422P/444P ↔ Rgb24 / Rgba under BT.601 / BT.709 / BT.2020
 //!   (limited range), plus the full-range YuvJ420P/422P/444P families
 //!   directly ↔ Rgb24 / Rgba (the format pins the matrix range; the
@@ -182,9 +200,9 @@
 //! alpha-capable / deep RGB pivots
 //! preferred where the endpoints call for them). [`supports`] /
 //! [`supports_direct`] report per-pair availability. The matrix is
-//! fully closed: **every ordered pair** of the 70 `PixelFormat`
-//! variants resolves — directly (1478 pairs) or through one staged
-//! pivot (all 4830).
+//! fully closed: **every ordered pair** of the 82 `PixelFormat`
+//! variants resolves — directly (2368 pairs) or through one staged
+//! pivot (all 6642).
 //!
 //! # Bit-depth precision policy
 //!
@@ -206,7 +224,9 @@
 //! codec pipelines feeding this crate (lossless intermediates,
 //! reference comparisons, bit-exact round-trip tests) need
 //! deterministic, invertible mappings. `Dither` applies only to the
-//! palette quantisation path (`Rgb24`/`Rgba` → `Pal8`).
+//! palette quantisation path (`Rgb24`/`Rgba` → `Pal8`) and to the
+//! 8 → 5 / 6-bit quantiser of the packed 16-bit words (see
+//! [`packed16`]); its default `None` keeps both deterministic.
 //!
 //! # Integer ↔ float
 //!
@@ -234,18 +254,31 @@
 //! attached — see the policy section on [`convert`] for the details.
 
 pub mod alpha;
+#[doc(hidden)]
 pub mod cmyk;
+pub mod colorspace;
 pub mod convert;
+#[doc(hidden)]
 pub mod dither;
+#[doc(hidden)]
 pub mod float;
 pub mod format_info;
+#[doc(hidden)]
 pub mod gray;
+#[cfg(feature = "icc")]
+pub mod icc;
+mod mat3;
+#[doc(hidden)]
+pub mod packed16;
+#[doc(hidden)]
 pub mod pal8;
 pub mod palette;
 mod planar8;
+#[doc(hidden)]
 pub mod rgb;
 mod simd_dispatch;
 pub mod transfer;
+#[doc(hidden)]
 pub mod yuv;
 mod yuv_simd;
 
@@ -254,8 +287,8 @@ pub use alpha::{
     unpremultiply,
 };
 pub use convert::{
-    convert, convert_in_place_if_same, convert_with, supports, supports_direct, ColorSpace,
-    ConvertContext, ConvertOptions, Dither, FrameInfo,
+    ColorSpace, ConvertContext, ConvertOptions, Dither, FrameInfo, convert,
+    convert_in_place_if_same, convert_with, staged_pivot, supports, supports_direct,
 };
 pub use format_info::{ChromaSubsampling, FormatInfo};
-pub use palette::{generate_palette, Palette, PaletteGenOptions, PaletteStrategy};
+pub use palette::{Palette, PaletteGenOptions, PaletteStrategy, generate_palette};

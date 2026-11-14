@@ -9,6 +9,169 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- *(colorspace)* `ColorModel::Luv(_)` / `Lchuv(_)` (CIE 1976 L\*u\*v\*, CIE 15 §8.2.2; `xyz_to_luv` / `luv_to_xyz`), the hue-first cylindrical forms `HclAb(_)` / `HclUv(_)`, `Jzazbz(nits)` / `JzCzhz(nits)` (Safdar et al. 2017 on absolute D65 XYZ; `xyz_abs_to_jzazbz` / `jzazbz_to_xyz_abs`), `ScRgb` (IEC 61966-2-2), narrow-range `YCbCrLimited(_)` (H.273 equations 41–43 as 8-bit codes / 255), `PhotoYcc` (Kodak Photo CD; `linear_rgb_to_photoycc` / `photoycc_to_linear_rgb`), `Log(CineonLog)` (Cineon printing density, 685 / 95 / 0.6 / 0.002) and `LmsOf(ConeResponse)` with the CAT02, Bradford and Hunt–Pointer–Estevez matrices. All round-trip sRGB within ±1 LSB at 16 bits; analytic spot values for white, black, mid grey and the primaries in `tests/colorspace_models.rs`
+
+- *(colorspace)* `ModelConverter`: a conversion between any two colour models planned once (matrices derived and inverted at construction, same-domain models fused into one 3 × 3) and run over interleaved `f64` / `f32` / 8-bit / 16-bit buffers, with `with_channels` (alpha / padding copied through), `with_gamut(GamutPolicy::Preserve | Clamp)`, and `with_threads` / `with_execution` (serial default, identical output). Integer buffers follow `ColorModel::component_ranges()`; a plain sRGB source is linearised through an exact per-code table and a plain sRGB destination encoded through a piecewise-linear table with error below 2e-6 (0.13 of a 16-bit code). `tests/colorspace_rows.rs`; `benches/colorspace_models.rs`
+
+- *(icc)* `ClutInterpolation::Tetrahedral` via `TransformOptions::with_interpolation`: simplex interpolation of the integer CLUT tags for any number of inputs (the `n + 1` cell corners along the diagonal, ordered by descending fraction) next to the default multilinear; both exact on grid points. Brings the 9-point Generic CMYK table from 1.19 to 0.41 ΔE2000 of the black-box validator
+- *(icc)* `IccTransform::precompute(grid)`: any transform with 1–4 input channels sampled on a regular grid into an in-memory device-link table (at most 2²⁴ values, built on the transform's thread budget) and run by simplex interpolation on 8-bit / 16-bit / `f32` buffers; `is_precomputed()`. Measured error against the exact transform in the README
+- *(icc)* `TransformOptions::with_legacy_perceptual_black(true)`: the ICC.1:2022 §6.3.4.3 black-point adjustment for perceptual lookup tables of pre-version-4 profiles (zero-based PCS black mapped linearly in XYZ onto the Table 16 black, white unchanged; inverse into a destination table). Off by default
+- *(icc)* `TransformOptions::with_execution(&ExecutionContext)`; `IccTransform::device_link_with(profile, options)`
+- *(fuzz)* `icc_transform` harness: fuzz-chosen intent / interpolation / threads / table grid over a parsed profile as source, destination, chain member and DeviceLink, through every buffer path and the precomputed table
+- *(bench)* `icc_transform` (matrix/TRC and CLUT profiles, exact / tetrahedral / precomputed, 1 MP and 12 MP)
+
+### Performance
+
+- *(colorspace)* `ModelConverter` against the per-colour `ColorModel::convert` loop, 1 MP serial (Apple M4 Max, shared machine, best of three): sRGB → XYZ 36.3 ms → 4.8 ms at 8 bits (29.6 ms `f32`), sRGB → CIELAB 83.9 → 13.9 ms (54.5 ms `f32`), CIELAB → sRGB 165 → 20.8 ms (44.6 ms `f32`), sRGB → Y′CbCr 8.6 → 2.4 ms `f32`; with the host's threads 1.1 / 2.4 / 2.8 / 0.7 ms
+- *(icc)* precomputed tables, 1 MP 8-bit serial: sRGB → Display P3 98 → 22.7 ms, sRGB → Generic CMYK 118 → 28.7 ms, Generic CMYK → sRGB 294 → 36.6 ms (4.0 / 4.6 / 4.4 ms on the host's threads); tetrahedral interpolation alone 294 → 171 ms on the 4-D table
+
+### Changed
+
+- *(colorspace)* `ColorModel::Yuv`, `Yiq` and `YDbDr` are now built from the constants of their broadcast standards on the 0.299 / 0.587 / 0.114 luma (`U = 0.436·(B′ − Y′) / 0.886`, `V = 0.615·(R′ − Y′) / 0.701`; I / Q the 33° rotation; `Db = 1.505·(B′ − Y′)`, `Dr = −1.902·(R′ − Y′)`) instead of matrices measured from a black-box tool; values move by up to 5e-4. `ColorModel::Lms` is named as the CIECAM02 `M_CAT02` matrix (same numbers)
+
+## [0.1.13](https://github.com/OxideAV/oxideav-pixfmt/compare/v0.1.12...v0.1.13) - 2026-11-07
+
+### Added
+
+- *(icc)* IccTransform::chain — Abstract profiles and device profiles in the middle ([#15](https://github.com/OxideAV/oxideav-pixfmt/pull/15))
+- *(icc)* multiProcessElementsType (DToBx / BToDx) float tags ([#15](https://github.com/OxideAV/oxideav-pixfmt/pull/15))
+- *(colorspace)* HSV / HSB, HSI, HCL, HCLp, Y′IQ, Y′UV, Y′DbDr, Ohta and LMS colour models ([#15](https://github.com/OxideAV/oxideav-pixfmt/pull/15))
+
+### Fixed
+
+- *(icc)* bound the values an mpet tag may decode by its own size ([#15](https://github.com/OxideAV/oxideav-pixfmt/pull/15))
+
+### Other
+
+- *(colorspace)* CIEDE2000 identity within 1e-12, not exactly zero
+- API hygiene: non_exhaustive option/info records + enums, hide kernel modules
+
+### Added
+
+- `ConvertOptions::new` plus `with_dither` / `with_palette` / `with_color_space` builders.
+- `PaletteGenOptions::new` plus `with_strategy` / `with_max_colors` / `with_transparency` builders.
+- *(colorspace)* `ColorModel::Hsv` (HSV / HSB), `Hsi`, `Hcl(_)`, `Hclp(_)`, `Yiq`, `Yuv`, `YDbDr`, `Ohta` and `Lms`, with `rgb_to_hsv` / `hsv_to_rgb`, `rgb_to_hsi` / `hsi_to_rgb`, `rgb_to_hcl` / `hcl_to_rgb` and the gamut-keeping `hclp_to_rgb`. Hue models from the Khronos Data Format 1.4 §5.5.8–5.5.11 hexagonal / angular hue; the Y′IQ / Y′UV / Y′DbDr / LMS matrices measured from black-box `magick -colorspace` output. All round-trip sRGB within ±1 LSB at 16 bits and match `magick -colorspace X` within 1e-6 (hue and broadcast models), 1e-5 (OHTA) and 1e-4 (LMS); `tests/colorspace_magick_crosscheck.rs` now checks the way back to sRGB too (#15)
+- *(icc)* `multiProcessElementsType` evaluation (ICC.1:2022 §10.16): `DToB0..3` / `BToD0..3` float tags with `curf` segmented curves (`parf` function types 0–2 and `samf` sampled segments), `matf` matrices with offsets, float `clut` and the `bACS` / `eACS` pass-throughs, unclipped between elements. They take precedence over the integer tags (§8.10.2 a), §8.10.3 a) for a DeviceLink's `DToB0`); DToB3 / BToD3 are used as ICC-absolute without media-white rescaling; a tag with an unknown element or that does not parse is skipped and the integer tags are used. `IccProfile::has_float_to_pcs` / `has_float_from_pcs`. `tests/icc_mpet.rs` matches `magick -profile a -profile b` within 1 / 65535 (#15)
+- *(icc)* `IccTransform::chain(&[&IccProfile], TransformOptions)`: transforms through more than two profiles. Abstract profiles (ICC.1:2022 §8.8) run their DToB0 / AToB0 PCS → PCS (§8.10.3), with Lab or XYZ on either side; device profiles in the middle are passed through (PCS → device → PCS, e.g. a print simulation); under ICC-absolute every step into a device profile rescales by the media whites around it (§6.2.3). `with_options` is the two-profile chain. A three-profile chain matches `magick -profile a -profile b -profile c` within 1 / 65535 (`tests/icc_chain.rs`) (#15)
+
+### Changed
+
+- `#[non_exhaustive]` on the `Dither`, `ColorSpace`, `PaletteStrategy` and `TransferFunction` enums and on the `FrameInfo`, `FormatInfo`, `ConvertOptions` and `PaletteGenOptions` records. Build them with `FrameInfo::new`, `FormatInfo::of`, `Default` / `new()` and the `with_*` builders. `RenderingIntent` stays exhaustive (ICC.1 Table 23 fixes its four values).
+- `#[doc(hidden)]` on the internal kernel modules `cmyk`, `dither`, `float`, `gray`, `packed16`, `pal8`, `rgb` and `yuv`. They stay `pub` for the crate's tests and benches; reach the conversions through `convert` / `convert_with`.
+
+## [0.1.12](https://github.com/OxideAV/oxideav-pixfmt/compare/v0.1.11...v0.1.12) - 2026-10-24
+
+### Added
+
+- *(icc)* DeviceLink transforms, VideoFrame integration, threads and tabulated input curves
+- *(colorspace)* ColorModel — linear sRGB, XYZ, xyY, Lab / LCh, Oklab / OkLCh, HSL, HWB, CMY / CMYK, gray, Y'PbPr / Y'CbCr
+- *(icc)* ICC v2/v4 profile parsing and profile-to-profile transforms behind the `icc` feature
+- *(convert)* core 0.1.41 packed RGB tier — 16-bit words + padded 32-bit layouts close the 82-format matrix
+
+### Fixed
+
+- unsafe blocks in x86_64 SIMD paths (edition 2024 unsafe_op_in_unsafe_fn)
+- *(rgb)* enumerate the AVX2 fill-swizzle mask lanes (clippy 1.99 needless_range_loop on the x86_64 cfg)
+
+### Other
+
+- edition 2024, MSRV 1.95
+- *(crosscheck)* the eight words and the padded layouts against the black-box validator; ordered dither on row bands
+- the 82-format matrix, the packed 16-bit word rules and the padded layouts in the README and crate doc
+- *(packed16)* monomorphised word kernels, branch-free fill swizzles, banded packed rows, alpha-less 8-bit pivot order
+
+### Added
+
+- *(icc)* new `icc` module behind the non-default `icc` feature (no new dependencies; the default build is unchanged): ICC v2 / v4 profile parsing and profile-to-profile transforms, clean-room from ICC.1:2022 (profile version 4.4). Header and tag table (§7.2 / §7.3), matrix/TRC and grayTRC models with the Annex F.1 inversion rules, `curv` and all five `para` functions, `mft1` / `mft2` (legacy 16-bit PCSLAB) / `mAB ` / `mBA ` LUTs with multilinear CLUTs, PCSXYZ ↔ PCSLAB (§6.4 / Annex A), the four rendering intents with the §8.10.2 tag fallback and ICC-absolute media-white scaling (§6.2.3; a display's media white is the PCS white per §9.2.36). `IccTransform::transform_{u8,u16,f32,pixel}` over RGB, CMYK, Gray, Lab, XYZ and n-colour device spaces (issue #15)
+- *(icc)* `IccTransform::device_link` (a DeviceLink's AToB0, §8.6); `transform_frame` / `frame_profile` / `frame_formats` run a transform over packed gray / RGB / CMYK `VideoFrame`s (8-bit, 16-bit, f32; alpha carried or synthesised; the `BlobKind::ICC` blob replaced); `TransformOptions::with_threads` (scoped threads, identical output)
+- *(icc)* the 8-bit and large 16-bit buffer paths tabulate the first-stage curves per input code and the CLUT walks only the cell's live dimensions: 1 MP 8-bit sRGB → P3 110 → 59 ms, sRGB → Generic CMYK 348 → 100 ms, Generic CMYK → sRGB 525 → 187 ms (serial, Apple M4 Max)
+- *(icc)* `IccProfileBuilder` (profile writer) and synthesized v4 profiles: `IccProfile::srgb()`, `display_p3()`, `adobe_rgb()`, `rec2020()`, `prophoto()` (colorants Bradford-adapted to the D50 PCS per Annex E), `gray(curve)`, `lab_d50()`
+- *(colorspace)* `ColorModel`: gamma-encoded sRGB ↔ linear sRGB, XYZ (D65 / Bradford D50), xyY, CIELAB and LCh(ab) (D65 or D50 white), Oklab, OkLCh, HSL, HWB, CMY, gray / linear gray, Y′PbPr and full-range Y′CbCr on `f64`; device CMYK with black generation / undercolour removal (`rgb_to_cmyk_with`, ISO 32000-2 §10.4.2) and the per-model building blocks. Round trips within ±1 LSB at 16 bits; `tests/colorspace_magick_crosscheck.rs` matches `magick -colorspace` within 1e-4 (issue #15)
+- *(colorspace)* new module: `RgbPrimaries` (BT.709, BT.2020, Display P3, Adobe RGB, ProPhoto) with the Khronos Data Format §14 RGB → XYZ derivation, the linearised Bradford adaptation of ICC.1 Annex E, and `delta_e2000` (CSS Color 4 §20.2)
+- *(tests)* `icc_profiles` (writer round trip, malformed-input errors, sRGB against the CSS Color 4 matrices, 16-bit matrix/TRC round trips, grayTRC model, absolute-intent scaling), `icc_lut_profiles` (synthesized `mAB ` / `mft2` / 8-bit-CLUT / 4-D CMYK profiles against the matrix model and round trips), and the black-box `icc_magick_crosscheck` (`magick -profile a -profile b`, CIEDE2000; see the README table)
+- *(fuzz)* `icc_profile` harness: arbitrary bytes into the parser, transforms between whatever parses
+
+- *(convert)* the twelve oxideav-core 0.1.41 packed RGB layouts join the closed matrix: the 16-bit `Rgb555Le/Be` / `Bgr555Le/Be` / `Rgb565Le/Be` / `Bgr565Le/Be` words and the padded `Rgbx` / `Bgrx` / `Xrgb` / `Xbgr`. A computed packed-RGB tier makes every pair between the twelve and the single-plane 8-bit family (`Rgb24` / `Bgr24` / `Rgba` / `Bgra` / `Argb` / `Abgr`), each other, `Gray8` and `Pal8` direct, and the padded four direct to and from every planar YUV(A) family member through the `Rgb24` engine. 82 formats, **all 82 × 81 = 6642 ordered pairs** convert (2368 direct, was 1820 of 4830); route-depth audit still at zero violations
+- *(packed16)* new module: `Packed16Layout` (bit positions, green width, byte order; `of(PixelFormat)` and the eight constants), the replication widen (`(v << 3) | (v >> 2)`, `(v << 2) | (v >> 4)`) and truncating quantiser (`v >> 3`, `v >> 2`) — exact round trips, and a 5-5-5 ↔ 5-6-5 relayout byte-identical to staging through 8 bits — plus tight-row kernels. The 5-5-5 top bit is written 0 and ignored on read (the core ruling)
+- *(packed16)* `ConvertOptions::dither` now reaches the 16-bit quantiser: `Bayer8x8` adds `(BAYER8[y & 7][x & 7] · (256 >> bits)) >> 6` before the truncation, `FloydSteinberg` diffuses the integer residual 7/16 right, 3/16 below-left, 5/16 below and the exact remainder below-right; both pinned bit-for-bit in `tests/packed16_words.rs`
+- *(rgb)* `swizzle4_fill` / `rgb3_to_rgba4_fill` (constant fourth lane; AVX2 twins of the permutation paths) and the `RGBX_POS` / `BGRX_POS` / `XRGB_POS` / `XBGR_POS` positions; `Rgb3` / `Rgba4` derive `Debug` / `PartialEq` / `Eq`. The padding byte is written 0 and never read; a padded → alpha move synthesises opaque alpha
+- *(format_info)* descriptors for the twelve (`bit_depth` 5 / 6 for the words — the widest component — and 8 for the padded four; no alpha)
+- *(fuzz)* the geometry harness builds the twelve as sources (words at odd offsets on padded strides, junk padding bytes)
+- *(tests)* `packed16_words` (16 tests: bit-layout pins against the core variant table, every word round-tripping through `Rgb24`, relayout parity with staging, the four-byte orders, `Gray8` / `Pal8` hops, both dither pins, odd widths on odd strides, thread parity, short planes), `padded_rgb` (9 tests), and two black-box validator crosschecks: the eight words widened to `rgb24` by both sides within ±2 with the pure-component words exact, and the padded layouts exact in both directions
+
+### Performance
+
+- *(packed16)* the word kernels are monomorphised on the green width, the word's byte order and the 8-bit side's byte order (`Rgb24` / `Bgr24`; `Rgba` / `Bgra` / `Argb` / `Abgr` positions, shared by the padded layouts), so the interleaved loads / stores vectorise: 12 MP `Rgb565Le → Rgb24` 7.8 → 1.2 ms serial (0.51 ms on the row bands), `→ Bgra` 8.7 → 1.6 ms, `Rgb24 → Rgb565Le` 1.9 → 1.3 ms (Apple M4 Max; `cargo bench --features bench --bench packed_rgb_12mp`)
+- *(rgb)* the scalar 3 → 4 promote and the fill swizzles select the constant lane instead of branching per lane: 12 MP `Rgb24 → Bgrx` / `Rgb24 → Rgba` 10.1 → 1.2 ms serial on aarch64
+- *(convert)* the historical swizzle / promote / demote / grey-broadcast rows and every `packed_map` row (Ya8 / Ya16Le / CMYK / deep packed) now run on the row-band driver: byte-identical, and threaded under a `ConvertContext` execution budget (`Bgrx → Rgb24` 2.6 → 0.57 ms at 12 MP with the host budget)
+- *(packed16)* the ordered dither runs on row bands (its threshold is a function of the picture position only): 12 MP `Rgb24 → Rgb565Le` under `Bayer8x8` 13.7 ms serial → 1.8 ms with the host budget, same bytes; `quantise_rows_at` takes the band's first row
+- *(convert)* an 8-bit RGB pivot order for alpha-less endpoints (`Rgb24` before `Rgba`): `Yuv420P → Rgb565Le` 10.3 → 4.8 ms serial / 1.0 ms threaded, same bytes (the synthesised alpha never reached the output)
+
+### Fixed
+
+- *(convert)* a front-door geometry gate on the source's first plane: a packed plane shorter than `plane_row_bytes × rows` at its stride is `Error::Invalid` on every route (the historical swizzle / promote / demote / grey-broadcast / palette row slicers indexed it unchecked and panicked)
+
+### Changed
+
+- edition 2024, MSRV 1.95
+- *(deps)* `oxideav-core` minimum 0.1.41 (the twelve variants, `is_packed_rgb` / `is_rgb`)
+
+## [0.1.11](https://github.com/OxideAV/oxideav-pixfmt/compare/v0.1.10...v0.1.11) - 2026-10-17
+
+### Added
+
+- *(convert)* planar GBR(A) ↔ deep grey direct rows, alpha-less deep pivots, ladder-rule widen on GBR → packed-16
+- *(convert)* palette alpha on Pal8 expansion, composed-lookup luma moves, 12 MP deep-grey bench, README rulings
+- *(convert)* deep grey ↔ planar YUV(A) via the luma plane, packed-16 → family on a banded encoder; route-depth audit at zero
+- *(convert)* deep grey ↔ packed deep RGB direct rows on the row-band engine
+
+### Fixed
+
+- *(convert)* mask over-range words before the composed luma lookup; miri-sized corpora for the round-476 suites
+
+### Other
+
+- *(lib)* the crate doc counts 1820 direct pairs after the GBR ↔ deep grey rows
+- *(convert)* planar GBR(A) ↔ packed deep RGB rows on the row-band engine
+- *(deep_gray)* float ↔ 16-bit grey gate (ramp exact, random within 1 LSB, YUV luma via float within 1 LSB of the direct route)
+- *(deep_gray)* clippy manual_clamp on the luma-check width
+- *(deep_gray)* shrink the round-476 corpora under miri
+- *(route_depth)* route-depth audit over every ordered pair + `staged_pivot` route inspector
+
+### Added
+
+- *(convert)* `staged_pivot(src, dst)`: the intermediate format `convert()` stages a pair through (`None` for direct pairs), so callers and tests can inspect the planner's route
+- *(convert)* deep grey ↔ packed deep RGB direct rows: `Gray10Le` / `Gray12Le` / `Gray16Le` → `Rgb48Le` / `Rgba64Le` (ladder widen to 16 bits, broadcast, opaque 65535 alpha) and `Rgb48Le` / `Rgba64Le` → `Gray10Le` / `Gray12Le` / `Gray16Le` (the Q30 full-range Y' row at 16 bits — within 1 LSB of the f64 projection, `r = g = b = v` gives `v` exactly — then truncation to the target width); `Ya16Le` ↔ `Gray10Le` / `Gray12Le`. Both packed rows run on the row-band engine. Closes 148 of the 320 audit violations (172 remain)
+- *(gray)* `gray16le_to_rgb48le` / `gray16le_to_rgba64le`; *(yuv)* `rgb48le_to_gray16le` / `rgba64le_to_gray16le`
+- *(convert)* computed rows `Gray10Le` / `Gray12Le` / `Gray16Le` ↔ **every** planar YUV(A) family member (8 / 10 / 12 / 16 bits, every siting, alpha or not) through the luma plane only: the luma is widened to the deeper of the two depths (exact ladder rule), range-moved there (H.273 equations 27–29 scaled by 2^(n−8); a full-range colour signal turns the move off) and narrowed to the target width; chroma is the exact neutral mid-code `1 << (bits − 1)`, alpha opaque full-scale. Row-banded. `Gray16Le ↔ Yuv444P16Le` rails: 0 ↔ 4096, 65535 ↔ 60160; every limited luma code round-trips exactly
+- *(convert)* computed rows `Rgb48Le` / `Rgba64Le` → every planar family member: one banded 16-bit encode through the Q30 deep matrix with the chroma subsampled at 16 bits, then every plane narrowed to the member's depth — byte-identical to the historical two-step route through the 16-bit 4:4:4 tier. The existing `Rgb48Le → Yuv*P16Le` / `Rgba64Le → Yuva*P16Le` table rows now run on the same banded engine (`planar8::encode_deep`)
+- *(route_depth)* the audit now asserts **zero** violations (320 → 0); direct pairs 1527 → 1760 of 4830
+- *(convert)* computed rows planar GBR(A) (all ten ladder members) ↔ `Gray10Le` / `Gray12Le` / `Gray16Le`: ladder-widened planes through the 16-bit Y' row (then truncation) out, the grey word rescaled and broadcast in; direct pairs 1760 → 1820
+- *(convert)* `Pal8 → Rgba` / `Bgra` / `Argb` / `Abgr` honour the palette-alpha side-channel (core 0.1.40 `VideoFrame::palette_alpha`): a transparent entry expands to alpha 0, entries the record does not cover (or a missing / malformed record) are opaque; `Pal8 → Rgb24` / `Bgr24` / `Gray8` drop alpha (documented rule). `Rgb(a) → Pal8` attaches the palette-alpha record next to the colour table when the `Palette` has non-opaque entries, so the frame stays self-describing. `oxideav-core` minimum is now `0.1.40` (same caret family)
+- *(bench)* `deep_gray_12mp`: the round-476 routes at 4032×3024 next to the pre-round two-step routes, serial and threaded
+
+### Fixed
+
+- *(convert)* the deep grey ↔ YUV luma move indexed its composed lookup table with the raw source word, so a 10 / 12-bit sample with dirty padding bits (legal input: hostile frames, containers that leave the high bits set) panicked with an out-of-bounds index (found by the `convert_geometry` fuzz target on 2026-10-16). Every sample is now masked to the declared depth before the lookup, and the table is only composed for pictures with at least `2^bits` samples — smaller pictures evaluate the move per sample (same bytes). `tests/over_range.rs` pins all-`0xFFFF` pictures on every new deep route, both directions, serial and threaded
+- *(tests)* the round-476 suites keep their full corpora natively and run a few pixels per representative member under miri; the all-pairs route-depth audit (planner only, no memory to check) is skipped there — the strict-provenance job had overrun GitHub's 6 h limit
+
+### Changed
+
+- *(convert)* `Gbrp10/12/14Le` / `Gbrap10/12/14Le` → `Rgb48Le` / `Rgba64Le` widen by the ladder rule (MSB replication, 10-bit peak 1023 → 65535) instead of a bare left shift (→ 65472); the way back is still truncation, so every round-trip stays exact and the rows now agree with every other widen in the crate (and with the new direct `Gbr* → Gray16Le` row)
+- *(convert)* when neither endpoint carries alpha, staged deep routes pivot through the alpha-less deep members (`Rgb48Le` before `Rgba64Le`, `Yuv444P16Le` before `Yuva444P16Le`) — same bytes, one plane / word less per pixel
+- *(convert)* the planar GBR(A) ↔ `Rgb48Le` / `Rgba64Le` rows run on the row-band engine (tight planes borrowed, bands on scoped threads): the staged `Gbrp10Le → Yuv420P10Le` route drops from 31.7 to 8.96 ms threaded at 12 MP
+- *(convert)* the deep luma range moves (identity-coded planes and the new grey ↔ YUV rows) read a per-process lookup table built from the exact rounded-division formula instead of dividing per sample — same bytes, a third of the time
+
+### Other
+
+- *(route_depth)* route-depth audit over all 4830 ordered pairs: when both endpoints carry more than 8 bits per channel every intermediate must carry at least `min(src, dst)` bits, alpha must survive when both endpoints have it, no route may pivot through `Pal8`, and float ↔ float never pivots through an integer format. Census at the start of round 476: 1527 direct / 3303 staged pairs, **320 depth violations** (every one a deep endpoint pivoting through `Gray8`, `Rgb24` or `Rgba`), pinned as the known list while they are closed
+
+## [0.1.10](https://github.com/OxideAV/oxideav-pixfmt/compare/v0.1.9...v0.1.10) - 2026-10-04
+
+### Other
+
+- README examples use the current registry API
+
 - Regression coverage for over-range deep sample words, both serial and
   threaded, plus every possible stored 16-bit word through existing
   conversion routes. This fork predates the upstream composed-luma

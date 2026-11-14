@@ -13,8 +13,8 @@
 
 use oxideav_core::{PixelFormat, VideoFrame, VideoPlane};
 use oxideav_pixfmt::{
-    convert, supports_direct, yuv::rgb48_pixel_to_yuv16, yuv::yuv16_pixel_to_rgb48, yuv::YuvMatrix,
-    ColorSpace, ConvertOptions, FrameInfo,
+    ColorSpace, ConvertOptions, FrameInfo, convert, supports_direct, yuv::YuvMatrix,
+    yuv::rgb48_pixel_to_yuv16, yuv::yuv16_pixel_to_rgb48,
 };
 
 fn rd16(buf: &[u8], i: usize) -> u16 {
@@ -173,10 +173,7 @@ fn deep_444_roundtrip_within_2lsb_16bit() {
         }],
     };
     for cs in SPACES {
-        let opts = ConvertOptions {
-            color_space: cs,
-            ..Default::default()
-        };
+        let opts = ConvertOptions::default().with_color_space(cs);
         let yuv = convert(
             &src,
             FrameInfo::new(PixelFormat::Rgb48Le, w as u32, h as u32),

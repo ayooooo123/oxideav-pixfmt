@@ -197,7 +197,7 @@ pub(crate) fn rgb24_to_yuv444(
 pub(crate) mod avx2;
 #[cfg(target_arch = "aarch64")]
 pub(crate) mod neon;
-#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-pub(crate) mod wasm;
 #[cfg(feature = "nightly")]
 pub(crate) mod portable;
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+pub(crate) mod wasm;

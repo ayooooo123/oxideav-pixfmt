@@ -1,8 +1,8 @@
 [package]
 name = "oxideav-pixfmt"
-version = "0.1.9"
-edition = "2021"
-rust-version = "1.80"
+version = "0.1.13"
+edition = "2024"
+rust-version = "1.95"
 license = "MIT"
 authors = ["Mark Karpeles"]
 description = "Pure-Rust pixel-format conversions, palette quantisation, and dithering — the oxideav framework's shared pixfmt layer"
@@ -24,9 +24,13 @@ decode-only = []
 # (`Fatal glibc error: malloc.c sysmalloc assertion failed`). Run the
 # benches with `cargo bench --features bench`.
 bench = ["dep:criterion"]
+# ICC colour management (`oxideav_pixfmt::icc`): v2 / v4 profile
+# parsing and profile-to-profile transforms. No extra dependencies;
+# off by default so the default build is unchanged.
+icc = []
 
 [dependencies]
-oxideav-core = "0.1"
+oxideav-core = "0.1.41"
 criterion = { version = "0.8", optional = true }
 
 [[bench]]
@@ -53,3 +57,23 @@ required-features = ["bench"]
 name = "heif_12mp"
 harness = false
 required-features = ["bench"]
+
+[[bench]]
+name = "deep_gray_12mp"
+harness = false
+required-features = ["bench"]
+
+[[bench]]
+name = "packed_rgb_12mp"
+harness = false
+required-features = ["bench"]
+
+[[bench]]
+name = "colorspace_models"
+harness = false
+required-features = ["bench"]
+
+[[bench]]
+name = "icc_transform"
+harness = false
+required-features = ["bench", "icc"]
